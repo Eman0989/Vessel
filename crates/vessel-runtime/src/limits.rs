@@ -1,4 +1,7 @@
+use std::time::Duration;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
+
+pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeLimits {
@@ -8,6 +11,7 @@ pub struct RuntimeLimits {
     pub max_memories: usize,
     pub max_tables: usize,
     pub max_table_elements: usize,
+    pub timeout: Duration,
 }
 
 impl Default for RuntimeLimits {
@@ -19,6 +23,7 @@ impl Default for RuntimeLimits {
             max_memories: 16,
             max_tables: 16,
             max_table_elements: 100_000,
+            timeout: Duration::from_secs(5),
         }
     }
 }

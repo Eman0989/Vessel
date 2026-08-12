@@ -8,6 +8,14 @@ pub enum RuntimeError {
     #[error("failed to configure WebAssembly execution budget: {0}")]
     Budget(#[source] wasmtime::Error),
 
+    #[error("WebAssembly execution exceeded its {timeout_ms} ms deadline")]
+    Timeout {
+        timeout_ms: u64,
+
+        #[source]
+        source: wasmtime::Error,
+    },
+
     #[error("failed to compile WebAssembly module: {0}")]
     Compile(#[source] wasmtime::Error),
 

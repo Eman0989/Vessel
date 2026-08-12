@@ -241,3 +241,97 @@ fn memory_limit_rejects_oversized_module() {
 
     assert!(matches!(result, Err(RuntimeError::Instantiate(_))));
 }
+
+#[test]
+fn epoch_deadline_stops_long_running_execution() {
+    use std::time::Duration;
+
+    const SPIN_MODULE: &str = r#"
+(module
+    (func (export "add")
+        (param i32 i32)
+        (result i32)
+
+        (loop $spin
+            br $spin
+        )
+
+        i32.const 0
+    )
+)
+"#;
+
+    let runtime = WasmRuntime::with_limits(RuntimeLimits {
+        fuel: u64::MAX,
+        timeout: Duration::from_millis(50),
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+
+    let result = runtime.invoke_i32_binary(SPIN_MODULE.as_bytes(), "add", 1, 2);
+
+    match result {
+        Err(RuntimeError::Timeout { timeout_ms, source }) => {
+            assert_eq!(timeout_ms, 50);
+
+            assert_eq!(
+                source.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::Interrupt),
+            );
+        }
+
+        other => {
+            panic!("expected timeout interrupt, got {other:?}");
+        }
+    }
+}
+
+#[test]
+fn runtime_remains_usable_after_timeout() {
+    use std::time::Duration;
+
+    const SPIN_MODULE: &str = r#"
+(module
+    (func (export "add")
+        (param i32 i32)
+        (result i32)
+
+        (loop $spin
+            br $spin
+        )
+
+        i32.const 0
+    )
+)
+"#;
+
+    const ADD_MODULE_AFTER_TIMEOUT: &str = r#"
+(module
+    (func (export "add")
+        (param i32 i32)
+        (result i32)
+
+        local.get 0
+        local.get 1
+        i32.add
+    )
+)
+"#;
+
+    let runtime = WasmRuntime::with_limits(RuntimeLimits {
+        fuel: u64::MAX,
+        timeout: Duration::from_millis(50),
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+
+    let timed_out = runtime.invoke_i32_binary(SPIN_MODULE.as_bytes(), "add", 1, 2);
+
+    assert!(matches!(timed_out, Err(RuntimeError::Timeout { .. })));
+
+    let result = runtime
+        .invoke_i32_binary(ADD_MODULE_AFTER_TIMEOUT.as_bytes(), "add", 20, 22)
+        .unwrap();
+
+    assert_eq!(result, 42);
+}
