@@ -2,6 +2,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("failed to initialize WebAssembly runtime: {0}")]
+    Initialize(#[source] wasmtime::Error),
+
+    #[error("failed to configure WebAssembly execution budget: {0}")]
+    Budget(#[source] wasmtime::Error),
+
     #[error("failed to compile WebAssembly module: {0}")]
     Compile(#[source] wasmtime::Error),
 

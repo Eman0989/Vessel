@@ -1,4 +1,4 @@
-use vessel_runtime::{RuntimeError, WasmRuntime};
+use vessel_runtime::{RuntimeError, RuntimeLimits, WasmRuntime};
 
 const ADD_MODULE: &str = r#"
 (module
@@ -173,4 +173,71 @@ fn wit_bindings_reject_incompatible_component() {
     let result = runtime.invoke_wit_bound_add(WRONG_COMPONENT.as_bytes(), 20, 22);
 
     assert!(matches!(result, Err(RuntimeError::ComponentInstantiate(_))));
+}
+
+#[test]
+fn fuel_stops_infinite_execution() {
+    const SPIN_MODULE: &str = r#"
+(module
+    (func (export "add")
+        (param i32 i32)
+        (result i32)
+
+        (loop $spin
+            br $spin
+        )
+
+        i32.const 0
+    )
+)
+"#;
+
+    let runtime = WasmRuntime::with_limits(RuntimeLimits {
+        fuel: 1_000,
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+
+    let result = runtime.invoke_i32_binary(SPIN_MODULE.as_bytes(), "add", 1, 2);
+
+    match result {
+        Err(RuntimeError::Execute(error)) => {
+            assert_eq!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::OutOfFuel),
+            );
+        }
+
+        other => {
+            panic!("expected out-of-fuel trap, got {other:?}");
+        }
+    }
+}
+
+#[test]
+fn memory_limit_rejects_oversized_module() {
+    const MEMORY_MODULE: &str = r#"
+(module
+    (memory 2)
+
+    (func (export "add")
+        (param i32 i32)
+        (result i32)
+
+        local.get 0
+        local.get 1
+        i32.add
+    )
+)
+"#;
+
+    let runtime = WasmRuntime::with_limits(RuntimeLimits {
+        memory_bytes: 64 * 1024,
+        ..RuntimeLimits::default()
+    })
+    .unwrap();
+
+    let result = runtime.invoke_i32_binary(MEMORY_MODULE.as_bytes(), "add", 20, 22);
+
+    assert!(matches!(result, Err(RuntimeError::Instantiate(_))));
 }
