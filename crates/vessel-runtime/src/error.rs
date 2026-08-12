@@ -18,4 +18,21 @@ pub enum RuntimeError {
 
     #[error("WebAssembly execution failed: {0}")]
     Execute(#[source] wasmtime::Error),
+
+    #[error("failed to compile WebAssembly component: {0}")]
+    ComponentCompile(#[source] wasmtime::Error),
+
+    #[error("failed to instantiate WebAssembly component: {0}")]
+    ComponentInstantiate(#[source] wasmtime::Error),
+
+    #[error("failed to resolve component export `{export}`: {source}")]
+    ComponentExport {
+        export: String,
+
+        #[source]
+        source: wasmtime::Error,
+    },
+
+    #[error("WebAssembly component execution failed: {0}")]
+    ComponentExecute(#[source] wasmtime::Error),
 }

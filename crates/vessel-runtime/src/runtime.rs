@@ -1,4 +1,5 @@
 use crate::RuntimeError;
+use wasmtime::component::{Component, Linker as ComponentLinker};
 use wasmtime::{Engine, Instance, Module, Store};
 
 #[derive(Clone)]
@@ -37,6 +38,38 @@ impl WasmRuntime {
         function
             .call(&mut store, (lhs, rhs))
             .map_err(RuntimeError::Execute)
+    }
+
+    pub fn invoke_component_i32_binary(
+        &self,
+        component_bytes: &[u8],
+        export: &str,
+        lhs: i32,
+        rhs: i32,
+    ) -> Result<i32, RuntimeError> {
+        let component = Component::new(&self.engine, component_bytes)
+            .map_err(RuntimeError::ComponentCompile)?;
+
+        let linker = ComponentLinker::<()>::new(&self.engine);
+
+        let mut store = Store::new(&self.engine, ());
+
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .map_err(RuntimeError::ComponentInstantiate)?;
+
+        let function = instance
+            .get_typed_func::<(i32, i32), (i32,)>(&mut store, export)
+            .map_err(|source| RuntimeError::ComponentExport {
+                export: export.to_string(),
+                source,
+            })?;
+
+        let (result,) = function
+            .call(&mut store, (lhs, rhs))
+            .map_err(RuntimeError::ComponentExecute)?;
+
+        Ok(result)
     }
 
     pub fn engine(&self) -> &Engine {

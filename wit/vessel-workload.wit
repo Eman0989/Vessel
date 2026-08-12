@@ -1,0 +1,5 @@
+package vessel:workload@0.1.0;
+
+world vessel-workload {
+    export add: func(a: s32, b: s32) -> s32;
+}
