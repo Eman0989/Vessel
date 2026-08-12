@@ -125,3 +125,52 @@ fn rejects_invalid_component() {
 
     assert!(matches!(result, Err(RuntimeError::ComponentCompile(_))));
 }
+
+#[test]
+fn executes_component_through_wit_bindings() {
+    let runtime = WasmRuntime::new();
+
+    let result = runtime
+        .invoke_wit_bound_add(ADD_COMPONENT.as_bytes(), 20, 22)
+        .unwrap();
+
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn wit_bindings_reject_incompatible_component() {
+    const WRONG_COMPONENT: &str = r#"
+(component
+    (core module $implementation
+        (func (export "subtract")
+            (param i32 i32)
+            (result i32)
+
+            local.get 0
+            local.get 1
+            i32.sub
+        )
+    )
+
+    (core instance $instance
+        (instantiate $implementation)
+    )
+
+    (func (export "subtract")
+        (param "a" s32)
+        (param "b" s32)
+        (result s32)
+
+        (canon lift
+            (core func $instance "subtract")
+        )
+    )
+)
+"#;
+
+    let runtime = WasmRuntime::new();
+
+    let result = runtime.invoke_wit_bound_add(WRONG_COMPONENT.as_bytes(), 20, 22);
+
+    assert!(matches!(result, Err(RuntimeError::ComponentInstantiate(_))));
+}

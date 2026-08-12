@@ -1,4 +1,4 @@
-use crate::RuntimeError;
+use crate::{RuntimeError, bindings::VesselWorkload};
 use wasmtime::component::{Component, Linker as ComponentLinker};
 use wasmtime::{Engine, Instance, Module, Store};
 
@@ -70,6 +70,27 @@ impl WasmRuntime {
             .map_err(RuntimeError::ComponentExecute)?;
 
         Ok(result)
+    }
+
+    pub fn invoke_wit_bound_add(
+        &self,
+        component_bytes: &[u8],
+        lhs: i32,
+        rhs: i32,
+    ) -> Result<i32, RuntimeError> {
+        let component = Component::new(&self.engine, component_bytes)
+            .map_err(RuntimeError::ComponentCompile)?;
+
+        let linker = ComponentLinker::<()>::new(&self.engine);
+
+        let mut store = Store::new(&self.engine, ());
+
+        let bindings = VesselWorkload::instantiate(&mut store, &component, &linker)
+            .map_err(RuntimeError::ComponentInstantiate)?;
+
+        bindings
+            .call_add(&mut store, lhs, rhs)
+            .map_err(RuntimeError::ComponentExecute)
     }
 
     pub fn engine(&self) -> &Engine {
