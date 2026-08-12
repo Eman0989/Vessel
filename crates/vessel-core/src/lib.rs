@@ -1,14 +1,15 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod deployment;
+mod error;
+mod ids;
+mod instance;
+mod node;
+mod resources;
+mod workload;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use deployment::{Deployment, DeploymentStatus};
+pub use error::CoreError;
+pub use ids::{DeploymentId, InstanceId, NodeId, WorkloadId};
+pub use instance::{Instance, InstanceStatus};
+pub use node::{Node, NodeStatus};
+pub use resources::{ResourceCapacity, ResourceRequest};
+pub use workload::{ArtifactRef, Workload, WorkloadSpec, WorkloadStatus};
