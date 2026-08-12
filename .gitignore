@@ -1,0 +1,26 @@
+# Rust
+target/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/*.log
+
+# Node
+node_modules/
+dist/
+
+# Runtime data
+.vessel/
+data/
+artifacts/
+
+# Logs
+*.log

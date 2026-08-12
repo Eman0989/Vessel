@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/vessel-core",
+    "crates/vessel-runtime",
+    "crates/vessel-scheduler",
+    "crates/vessel-registry",
+    "crates/vessel-policy",
+    "crates/vessel-telemetry",
+    "crates/vessel-worker",
+    "crates/vessel-control",
+    "crates/vessel-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Eman0989/vessel"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
