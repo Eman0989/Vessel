@@ -458,3 +458,55 @@ fn explicit_directory_is_preopened_for_wasi() {
 
     assert_eq!(directories, vec!["/data".to_string()]);
 }
+
+#[test]
+fn read_only_preopen_rejects_file_creation() {
+    use std::path::PathBuf;
+
+    use vessel_policy::{CapabilityPolicy, DirectoryAccess, DirectoryCapability};
+
+    let host_directory = tempfile::tempdir().unwrap();
+
+    let policy = CapabilityPolicy {
+        directories: vec![DirectoryCapability {
+            host_path: PathBuf::from(host_directory.path()),
+            guest_path: "/data".to_string(),
+            access: DirectoryAccess::ReadOnly,
+        }],
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let created = runtime.wasi_can_create_file("blocked.txt").unwrap();
+
+    assert!(!created);
+
+    assert!(!host_directory.path().join("blocked.txt").exists());
+}
+
+#[test]
+fn read_write_preopen_allows_file_creation() {
+    use std::path::PathBuf;
+
+    use vessel_policy::{CapabilityPolicy, DirectoryAccess, DirectoryCapability};
+
+    let host_directory = tempfile::tempdir().unwrap();
+
+    let policy = CapabilityPolicy {
+        directories: vec![DirectoryCapability {
+            host_path: PathBuf::from(host_directory.path()),
+            guest_path: "/data".to_string(),
+            access: DirectoryAccess::ReadWrite,
+        }],
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let created = runtime.wasi_can_create_file("allowed.txt").unwrap();
+
+    assert!(created);
+
+    assert!(host_directory.path().join("allowed.txt").exists());
+}

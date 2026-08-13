@@ -283,6 +283,49 @@ impl WasmRuntime {
             .collect())
     }
 
+    pub fn wasi_can_create_file(&self, file_name: &str) -> Result<bool, RuntimeError> {
+        use wasmtime_wasi::p2::bindings::sync::filesystem::{preopens, types};
+
+        let mut store = self.new_store()?;
+        let mut filesystem = store.data_mut().filesystem();
+
+        let directories =
+            preopens::Host::get_directories(&mut filesystem).map_err(RuntimeError::WasiContext)?;
+
+        let Some((directory, _)) = directories.into_iter().next() else {
+            return Ok(false);
+        };
+
+        let result = types::HostDescriptor::open_at(
+            &mut filesystem,
+            directory,
+            types::PathFlags::empty(),
+            file_name.to_string(),
+            types::OpenFlags::CREATE,
+            types::DescriptorFlags::WRITE,
+        );
+
+        match result {
+            Ok(_) => Ok(true),
+
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(
+                    wasmtime_wasi::p2::bindings::filesystem::types::ErrorCode::ReadOnly
+                        | wasmtime_wasi::p2::bindings::filesystem::types::ErrorCode::NotPermitted
+                )
+                ) =>
+            {
+                Ok(false)
+            }
+
+            Err(error) => Err(RuntimeError::WasiContext(wasmtime::Error::msg(
+                error.to_string(),
+            ))),
+        }
+    }
+
     pub fn policy(&self) -> &CapabilityPolicy {
         &self.policy
     }
