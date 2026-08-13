@@ -1,3 +1,4 @@
+mod cluster;
 mod deployment;
 mod error;
 mod ids;
@@ -6,6 +7,7 @@ mod node;
 mod resources;
 mod workload;
 
+pub use cluster::{WorkerHeartbeat, WorkerRegistration};
 pub use deployment::{Deployment, DeploymentStatus};
 pub use error::CoreError;
 pub use ids::{DeploymentId, InstanceId, NodeId, WorkloadId};

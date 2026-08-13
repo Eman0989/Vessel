@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     Json, Router,
@@ -9,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use vessel_core::{
     Deployment, DeploymentId, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
-    Workload,
+    WorkerHeartbeat, WorkerRegistration, Workload,
 };
 
 use crate::{ControlError, ControlState};
@@ -50,6 +53,8 @@ pub struct TransitionInstanceRequest {
 pub fn router(state: ControlState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/cluster/register", post(register_worker))
+        .route("/v1/cluster/heartbeat", post(record_heartbeat))
         .route("/v1/nodes", get(list_nodes).post(register_node))
         .route("/v1/nodes/{id}/status", post(update_node_status))
         .route("/v1/workloads", get(list_workloads).post(register_workload))
@@ -98,6 +103,33 @@ fn control_error_response(error: ControlError) -> ApiError {
             error: error.to_string(),
         }),
     )
+}
+
+fn observed_at_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn register_worker(
+    State(state): State<SharedState>,
+    Json(registration): Json<WorkerRegistration>,
+) -> Result<Json<Node>, ApiError> {
+    let node = lock_state(&state)?.register_worker(registration, observed_at_ms());
+
+    Ok(Json(node))
+}
+
+async fn record_heartbeat(
+    State(state): State<SharedState>,
+    Json(heartbeat): Json<WorkerHeartbeat>,
+) -> Result<Json<Node>, ApiError> {
+    let node = lock_state(&state)?
+        .record_heartbeat(heartbeat, observed_at_ms())
+        .map_err(control_error_response)?;
+
+    Ok(Json(node))
 }
 
 async fn health() -> Json<HealthResponse> {

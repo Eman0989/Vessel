@@ -460,3 +460,128 @@ async fn bare_assigned_transition_is_rejected_over_http() {
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
 }
+
+#[tokio::test]
+async fn worker_can_register_through_cluster_protocol() {
+    use vessel_core::WorkerRegistration;
+
+    let app = test_app();
+
+    let registration = WorkerRegistration::new(node("cluster-node-01"));
+
+    let body = serde_json::to_vec(&registration).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK,);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/nodes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let json = body_json(response).await;
+
+    assert_eq!(json.as_array().unwrap().len(), 1,);
+
+    assert_eq!(json[0]["id"], "cluster-node-01",);
+}
+
+#[tokio::test]
+async fn heartbeat_refreshes_registered_worker_over_http() {
+    use vessel_core::{WorkerHeartbeat, WorkerRegistration};
+
+    let app = test_app();
+
+    let registration = WorkerRegistration::new(node("cluster-node-01"));
+
+    let body = serde_json::to_vec(&registration).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let heartbeat = WorkerHeartbeat {
+        node_id: NodeId::new("cluster-node-01"),
+        status: NodeStatus::Draining,
+        capacity: ResourceCapacity::new(8_000, 1_073_741_824, 16),
+        allocated: ResourceRequest::new(500, 67_108_864),
+        allocated_instances: 1,
+    };
+
+    let body = serde_json::to_vec(&heartbeat).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/heartbeat")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK,);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["status"], "draining",);
+    assert_eq!(json["capacity"]["cpu_millis"], 8_000,);
+    assert_eq!(json["allocated_instances"], 1,);
+}
+
+#[tokio::test]
+async fn heartbeat_from_unknown_worker_returns_not_found() {
+    use vessel_core::WorkerHeartbeat;
+
+    let heartbeat = WorkerHeartbeat {
+        node_id: NodeId::new("missing-node"),
+        status: NodeStatus::Ready,
+        capacity: ResourceCapacity::default(),
+        allocated: ResourceRequest::default(),
+        allocated_instances: 0,
+    };
+
+    let body = serde_json::to_vec(&heartbeat).unwrap();
+
+    let response = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/heartbeat")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND,);
+}

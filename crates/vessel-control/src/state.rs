@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use vessel_core::{
     Deployment, DeploymentId, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
-    Workload, WorkloadId,
+    WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
 use crate::ControlError;
@@ -13,11 +13,56 @@ pub struct ControlState {
     workloads: BTreeMap<WorkloadId, Workload>,
     deployments: BTreeMap<DeploymentId, Deployment>,
     instances: BTreeMap<InstanceId, Instance>,
+    node_last_seen_ms: BTreeMap<NodeId, u64>,
 }
 
 impl ControlState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn register_worker(
+        &mut self,
+        registration: WorkerRegistration,
+        observed_at_ms: u64,
+    ) -> Node {
+        let node = registration.node;
+        let node_id = node.id.clone();
+
+        self.nodes.insert(node_id.clone(), node.clone());
+        self.node_last_seen_ms.insert(node_id, observed_at_ms);
+
+        node
+    }
+
+    pub fn record_heartbeat(
+        &mut self,
+        heartbeat: WorkerHeartbeat,
+        observed_at_ms: u64,
+    ) -> Result<Node, ControlError> {
+        let node_id = heartbeat.node_id.clone();
+
+        let updated = {
+            let node = self
+                .nodes
+                .get_mut(&node_id)
+                .ok_or_else(|| ControlError::NodeNotFound(node_id.clone()))?;
+
+            node.status = heartbeat.status;
+            node.capacity = heartbeat.capacity;
+            node.allocated = heartbeat.allocated;
+            node.allocated_instances = heartbeat.allocated_instances;
+
+            node.clone()
+        };
+
+        self.node_last_seen_ms.insert(node_id, observed_at_ms);
+
+        Ok(updated)
+    }
+
+    pub fn node_last_seen_ms(&self, id: &NodeId) -> Option<u64> {
+        self.node_last_seen_ms.get(id).copied()
     }
 
     pub fn register_node(&mut self, node: Node) -> Result<(), ControlError> {

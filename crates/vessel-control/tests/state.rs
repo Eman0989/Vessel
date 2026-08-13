@@ -443,3 +443,91 @@ fn invalid_instance_transition_surfaces_core_error() {
         },),
     );
 }
+
+#[test]
+fn worker_registration_is_idempotent_and_records_liveness() {
+    use vessel_core::WorkerRegistration;
+
+    let mut state = ControlState::new();
+
+    let first = WorkerRegistration::new(node("node-cluster-01"));
+
+    state.register_worker(first, 1_000);
+
+    assert_eq!(
+        state.node_last_seen_ms(&NodeId::new("node-cluster-01"),),
+        Some(1_000),
+    );
+
+    let mut replacement = node("node-cluster-01");
+
+    replacement.name = "restarted-worker".to_string();
+
+    state.register_worker(WorkerRegistration::new(replacement), 2_000);
+
+    assert_eq!(state.node_count(), 1);
+
+    assert_eq!(
+        state.node(&NodeId::new("node-cluster-01")).unwrap().name,
+        "restarted-worker",
+    );
+
+    assert_eq!(
+        state.node_last_seen_ms(&NodeId::new("node-cluster-01"),),
+        Some(2_000),
+    );
+}
+
+#[test]
+fn heartbeat_refreshes_node_state_and_liveness() {
+    use vessel_core::{ResourceRequest, WorkerHeartbeat, WorkerRegistration};
+
+    let mut state = ControlState::new();
+
+    state.register_worker(WorkerRegistration::new(node("node-cluster-01")), 1_000);
+
+    let heartbeat = WorkerHeartbeat {
+        node_id: NodeId::new("node-cluster-01"),
+        status: NodeStatus::Draining,
+        capacity: ResourceCapacity::new(8_000, 1_073_741_824, 16),
+        allocated: ResourceRequest::new(1_000, 134_217_728),
+        allocated_instances: 2,
+    };
+
+    let updated = state.record_heartbeat(heartbeat, 2_000).unwrap();
+
+    assert_eq!(updated.status, NodeStatus::Draining,);
+    assert_eq!(updated.capacity.cpu_millis, 8_000,);
+    assert_eq!(updated.allocated.cpu_millis, 1_000,);
+    assert_eq!(updated.allocated_instances, 2,);
+
+    assert_eq!(
+        state.node_last_seen_ms(&NodeId::new("node-cluster-01"),),
+        Some(2_000),
+    );
+}
+
+#[test]
+fn heartbeat_from_unknown_worker_is_rejected() {
+    use vessel_core::WorkerHeartbeat;
+
+    let mut state = ControlState::new();
+
+    let error = state
+        .record_heartbeat(
+            WorkerHeartbeat {
+                node_id: NodeId::new("missing-node"),
+                status: NodeStatus::Ready,
+                capacity: ResourceCapacity::default(),
+                allocated: ResourceRequest::default(),
+                allocated_instances: 0,
+            },
+            1_000,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::NodeNotFound(NodeId::new("missing-node"),),
+    );
+}

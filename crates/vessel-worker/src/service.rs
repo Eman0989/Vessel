@@ -3,7 +3,10 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use vessel_core::{Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest};
+use vessel_core::{
+    Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, WorkerHeartbeat,
+    WorkerRegistration,
+};
 use vessel_runtime::WasmRuntime;
 
 use crate::{ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError};
@@ -50,6 +53,16 @@ impl WorkerService {
 
     pub fn available_capacity(&self) -> Result<ResourceCapacity, WorkerError> {
         Ok(self.lock_node()?.available_capacity())
+    }
+
+    pub fn registration(&self) -> Result<WorkerRegistration, WorkerError> {
+        Ok(WorkerRegistration::new(self.node_snapshot()?))
+    }
+
+    pub fn heartbeat(&self) -> Result<WorkerHeartbeat, WorkerError> {
+        let node = self.node_snapshot()?;
+
+        Ok(WorkerHeartbeat::from_node(&node))
     }
 
     pub fn drain(&self) -> Result<(), WorkerError> {

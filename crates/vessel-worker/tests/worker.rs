@@ -142,3 +142,37 @@ fn draining_worker_rejects_new_execution_until_resumed() {
 
     assert_eq!(result.value, 42);
 }
+
+#[test]
+fn worker_builds_registration_and_heartbeat_snapshots() {
+    use vessel_core::{NodeStatus, ResourceCapacity};
+
+    let capacity = ResourceCapacity::new(4_000, 536_870_912, 8);
+
+    let worker = WorkerService::new(
+        WorkerConfig::new("worker-cluster-01")
+            .with_name("cluster-worker")
+            .with_region("eu-central")
+            .with_capacity(capacity),
+    );
+
+    let registration = worker.registration().unwrap();
+
+    assert_eq!(registration.node.id.as_str(), "worker-cluster-01",);
+    assert_eq!(registration.node.name, "cluster-worker",);
+    assert_eq!(registration.node.region, "eu-central",);
+    assert_eq!(registration.node.capacity, capacity,);
+
+    let heartbeat = worker.heartbeat().unwrap();
+
+    assert_eq!(heartbeat.node_id.as_str(), "worker-cluster-01",);
+    assert_eq!(heartbeat.status, NodeStatus::Ready,);
+    assert_eq!(heartbeat.capacity, capacity,);
+    assert_eq!(heartbeat.allocated_instances, 0,);
+
+    worker.drain().unwrap();
+
+    let heartbeat = worker.heartbeat().unwrap();
+
+    assert_eq!(heartbeat.status, NodeStatus::Draining,);
+}
