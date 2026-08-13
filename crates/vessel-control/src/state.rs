@@ -24,6 +24,31 @@ impl ControlState {
         Self::default()
     }
 
+    pub(crate) fn restore_node_snapshot(
+        &mut self,
+        node: Node,
+        endpoint: Option<String>,
+        last_seen_ms: Option<u64>,
+    ) -> Result<(), ControlError> {
+        if self.nodes.contains_key(&node.id) {
+            return Err(ControlError::NodeAlreadyExists(node.id.clone()));
+        }
+
+        let node_id = node.id.clone();
+
+        self.nodes.insert(node_id.clone(), node);
+
+        if let Some(endpoint) = endpoint {
+            self.worker_endpoints.insert(node_id.clone(), endpoint);
+        }
+
+        if let Some(last_seen_ms) = last_seen_ms {
+            self.node_last_seen_ms.insert(node_id, last_seen_ms);
+        }
+
+        Ok(())
+    }
+
     pub fn register_worker(
         &mut self,
         registration: WorkerRegistration,
