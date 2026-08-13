@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!(
         "VESSEL worker {} listening on {}",
-        worker.node_id(),
+        worker.node_id()?,
         listener.local_addr()?,
     );
 

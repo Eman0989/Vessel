@@ -48,7 +48,7 @@ fn worker_reports_configured_node_state_and_capacity() {
 
     let worker = WorkerService::new(config);
 
-    let node = worker.node();
+    let node = worker.node_snapshot().unwrap();
 
     assert_eq!(node.id.as_str(), "worker-capacity-01",);
 
@@ -66,5 +66,45 @@ fn worker_reports_configured_node_state_and_capacity() {
 
     assert_eq!(node.allocated_instances, 0,);
 
-    assert_eq!(worker.available_capacity(), capacity,);
+    assert_eq!(worker.available_capacity().unwrap(), capacity);
+}
+
+#[test]
+fn worker_rejects_execution_above_capacity() {
+    use vessel_core::{ResourceCapacity, ResourceRequest};
+
+    let worker = WorkerService::new(
+        WorkerConfig::new("worker-limited").with_capacity(ResourceCapacity::new(500, 1_048_576, 1)),
+    );
+
+    let request = ExecutionRequest::new(b"not even valid wasm".to_vec(), "add", 20, 22)
+        .with_resources(ResourceRequest::new(600, 1_048_576));
+
+    let error = worker.execute(&request).unwrap_err();
+
+    assert!(matches!(error, WorkerError::Core(_)));
+
+    let node = worker.node_snapshot().unwrap();
+
+    assert_eq!(node.allocated_instances, 0);
+}
+
+#[test]
+fn worker_releases_capacity_after_runtime_failure() {
+    use vessel_core::ResourceRequest;
+
+    let worker = WorkerService::new(WorkerConfig::new("worker-release"));
+
+    let request = ExecutionRequest::new(ADD_MODULE, "missing-export", 20, 22)
+        .with_resources(ResourceRequest::new(100, 1_024));
+
+    let error = worker.execute(&request).unwrap_err();
+
+    assert!(matches!(error, WorkerError::Runtime(_)));
+
+    let node = worker.node_snapshot().unwrap();
+
+    assert_eq!(node.allocated.cpu_millis, 0,);
+    assert_eq!(node.allocated.memory_bytes, 0,);
+    assert_eq!(node.allocated_instances, 0,);
 }

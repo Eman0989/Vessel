@@ -9,7 +9,7 @@ use axum::{
 use serde::Serialize;
 use vessel_core::{NodeStatus, ResourceCapacity, ResourceRequest};
 
-use crate::{ExecutionRequest, ExecutionResult, WorkerService};
+use crate::{ExecutionRequest, ExecutionResult, WorkerError, WorkerService};
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -41,23 +41,40 @@ pub fn router(worker: WorkerService) -> Router {
         .with_state(Arc::new(worker))
 }
 
+fn worker_error_response(error: WorkerError) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match &error {
+        WorkerError::Core(_) => StatusCode::SERVICE_UNAVAILABLE,
+        WorkerError::Runtime(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        WorkerError::StatePoisoned => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-async fn status(State(worker): State<Arc<WorkerService>>) -> Json<WorkerStatusResponse> {
-    let node = worker.node();
+async fn status(
+    State(worker): State<Arc<WorkerService>>,
+) -> Result<Json<WorkerStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let node = worker.node_snapshot().map_err(worker_error_response)?;
 
-    Json(WorkerStatusResponse {
+    Ok(Json(WorkerStatusResponse {
         node_id: node.id.to_string(),
         name: node.name.clone(),
         region: node.region.clone(),
         status: node.status,
         capacity: node.capacity,
         allocated: node.allocated,
-        available_capacity: worker.available_capacity(),
+        available_capacity: node.available_capacity(),
         allocated_instances: node.allocated_instances,
-    })
+    }))
 }
 
 async fn execute(
@@ -69,12 +86,7 @@ async fn execute(
     match result {
         Ok(Ok(result)) => Ok(Json(result)),
 
-        Ok(Err(error)) => Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ErrorResponse {
-                error: error.to_string(),
-            }),
-        )),
+        Ok(Err(error)) => Err(worker_error_response(error)),
 
         Err(error) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,

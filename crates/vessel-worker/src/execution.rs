@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use vessel_core::NodeId;
+use vessel_core::{NodeId, ResourceRequest};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionRequest {
@@ -7,6 +7,7 @@ pub struct ExecutionRequest {
     pub export: String,
     pub lhs: i32,
     pub rhs: i32,
+    pub resources: ResourceRequest,
 }
 
 impl ExecutionRequest {
@@ -21,7 +22,13 @@ impl ExecutionRequest {
             export: export.into(),
             lhs,
             rhs,
+            resources: ResourceRequest::default(),
         }
+    }
+
+    pub fn with_resources(mut self, resources: ResourceRequest) -> Self {
+        self.resources = resources;
+        self
     }
 }
 

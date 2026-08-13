@@ -5,7 +5,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
-use vessel_core::ResourceCapacity;
+use vessel_core::{ResourceCapacity, ResourceRequest};
 use vessel_worker::{ExecutionRequest, ExecutionResult, WorkerConfig, WorkerService, router};
 
 const ADD_MODULE: &[u8] = br#"
@@ -132,4 +132,26 @@ async fn execute_endpoint_reports_runtime_failure() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+}
+
+#[tokio::test]
+async fn execute_endpoint_rejects_work_above_capacity() {
+    let request = ExecutionRequest::new(ADD_MODULE, "add", 20, 22)
+        .with_resources(ResourceRequest::new(2_001, 1));
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/execute")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE,);
 }

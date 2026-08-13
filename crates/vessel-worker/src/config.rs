@@ -16,7 +16,7 @@ impl WorkerConfig {
             name: node_id.to_string(),
             node_id,
             region: "local".to_string(),
-            capacity: ResourceCapacity::default(),
+            capacity: ResourceCapacity::new(1_000, 67_108_864, 1),
         }
     }
 
