@@ -153,6 +153,7 @@ fn worker_builds_registration_and_heartbeat_snapshots() {
         WorkerConfig::new("worker-cluster-01")
             .with_name("cluster-worker")
             .with_region("eu-central")
+            .with_endpoint("http://worker-cluster-01:7001")
             .with_capacity(capacity),
     );
 
@@ -162,6 +163,7 @@ fn worker_builds_registration_and_heartbeat_snapshots() {
     assert_eq!(registration.node.name, "cluster-worker",);
     assert_eq!(registration.node.region, "eu-central",);
     assert_eq!(registration.node.capacity, capacity,);
+    assert_eq!(registration.endpoint, "http://worker-cluster-01:7001",);
 
     let heartbeat = worker.heartbeat().unwrap();
 

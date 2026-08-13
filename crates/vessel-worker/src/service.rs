@@ -13,6 +13,7 @@ use crate::{ArtifactCache, ExecutionRequest, ExecutionResult, WorkerConfig, Work
 
 pub struct WorkerService {
     node: Mutex<Node>,
+    endpoint: String,
     runtime: WasmRuntime,
     artifacts: ArtifactCache,
 }
@@ -48,6 +49,7 @@ impl WorkerService {
 
         Self {
             node: Mutex::new(node),
+            endpoint: config.endpoint,
             runtime,
             artifacts: ArtifactCache::new(registry_url),
         }
@@ -70,7 +72,10 @@ impl WorkerService {
     }
 
     pub fn registration(&self) -> Result<WorkerRegistration, WorkerError> {
-        Ok(WorkerRegistration::new(self.node_snapshot()?))
+        Ok(WorkerRegistration::new(
+            self.node_snapshot()?,
+            self.endpoint.clone(),
+        ))
     }
 
     pub fn heartbeat(&self) -> Result<WorkerHeartbeat, WorkerError> {

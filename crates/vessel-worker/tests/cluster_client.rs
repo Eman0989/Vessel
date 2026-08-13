@@ -76,6 +76,8 @@ async fn cluster_client_sends_registration_and_heartbeat() {
             "cluster-client-01",
         );
 
+        assert_eq!(received.registrations[0].endpoint, "http://127.0.0.1:7001",);
+
         assert_eq!(received.heartbeats.len(), 1,);
 
         assert_eq!(received.heartbeats[0].status, NodeStatus::Draining,);

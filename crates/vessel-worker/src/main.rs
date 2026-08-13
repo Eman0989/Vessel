@@ -9,6 +9,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let address = env::var("VESSEL_WORKER_ADDR").unwrap_or_else(|_| "127.0.0.1:7001".to_string());
 
+    let worker_url = env::var("VESSEL_WORKER_URL").unwrap_or_else(|_| format!("http://{address}"));
+
     let control_url =
         env::var("VESSEL_CONTROL_URL").unwrap_or_else(|_| "http://127.0.0.1:7000".to_string());
 
@@ -21,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(5_000);
 
     let worker = Arc::new(WorkerService::with_registry(
-        WorkerConfig::new(node_id),
+        WorkerConfig::new(node_id).with_endpoint(worker_url),
         registry_url,
     ));
 

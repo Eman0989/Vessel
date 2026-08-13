@@ -5,6 +5,7 @@ pub struct WorkerConfig {
     pub node_id: NodeId,
     pub name: String,
     pub region: String,
+    pub endpoint: String,
     pub capacity: ResourceCapacity,
 }
 
@@ -16,6 +17,7 @@ impl WorkerConfig {
             name: node_id.to_string(),
             node_id,
             region: "local".to_string(),
+            endpoint: "http://127.0.0.1:7001".to_string(),
             capacity: ResourceCapacity::new(1_000, 67_108_864, 1),
         }
     }
@@ -27,6 +29,11 @@ impl WorkerConfig {
 
     pub fn with_region(mut self, region: impl Into<String>) -> Self {
         self.region = region.into();
+        self
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
         self
     }
 

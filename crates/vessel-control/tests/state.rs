@@ -450,7 +450,7 @@ fn worker_registration_is_idempotent_and_records_liveness() {
 
     let mut state = ControlState::new();
 
-    let first = WorkerRegistration::new(node("node-cluster-01"));
+    let first = WorkerRegistration::new(node("node-cluster-01"), "http://node-cluster-01:7001");
 
     state.register_worker(first, 1_000);
 
@@ -459,11 +459,19 @@ fn worker_registration_is_idempotent_and_records_liveness() {
         Some(1_000),
     );
 
+    assert_eq!(
+        state.worker_endpoint(&NodeId::new("node-cluster-01")),
+        Some("http://node-cluster-01:7001"),
+    );
+
     let mut replacement = node("node-cluster-01");
 
     replacement.name = "restarted-worker".to_string();
 
-    state.register_worker(WorkerRegistration::new(replacement), 2_000);
+    state.register_worker(
+        WorkerRegistration::new(replacement, "http://node-cluster-01:7101"),
+        2_000,
+    );
 
     assert_eq!(state.node_count(), 1);
 
@@ -476,6 +484,11 @@ fn worker_registration_is_idempotent_and_records_liveness() {
         state.node_last_seen_ms(&NodeId::new("node-cluster-01"),),
         Some(2_000),
     );
+
+    assert_eq!(
+        state.worker_endpoint(&NodeId::new("node-cluster-01")),
+        Some("http://node-cluster-01:7101"),
+    );
 }
 
 #[test]
@@ -484,7 +497,10 @@ fn heartbeat_refreshes_node_state_and_liveness() {
 
     let mut state = ControlState::new();
 
-    state.register_worker(WorkerRegistration::new(node("node-cluster-01")), 1_000);
+    state.register_worker(
+        WorkerRegistration::new(node("node-cluster-01"), "http://node-cluster-01:7001"),
+        1_000,
+    );
 
     let heartbeat = WorkerHeartbeat {
         node_id: NodeId::new("node-cluster-01"),

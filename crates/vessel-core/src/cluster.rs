@@ -5,11 +5,15 @@ use crate::{Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerRegistration {
     pub node: Node,
+    pub endpoint: String,
 }
 
 impl WorkerRegistration {
-    pub fn new(node: Node) -> Self {
-        Self { node }
+    pub fn new(node: Node, endpoint: impl Into<String>) -> Self {
+        Self {
+            node,
+            endpoint: endpoint.into(),
+        }
     }
 }
 

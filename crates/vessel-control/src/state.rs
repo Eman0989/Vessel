@@ -16,6 +16,7 @@ pub struct ControlState {
     deployments: BTreeMap<DeploymentId, Deployment>,
     instances: BTreeMap<InstanceId, Instance>,
     node_last_seen_ms: BTreeMap<NodeId, u64>,
+    worker_endpoints: BTreeMap<NodeId, String>,
 }
 
 impl ControlState {
@@ -28,10 +29,11 @@ impl ControlState {
         registration: WorkerRegistration,
         observed_at_ms: u64,
     ) -> Node {
-        let node = registration.node;
+        let WorkerRegistration { node, endpoint } = registration;
         let node_id = node.id.clone();
 
         self.nodes.insert(node_id.clone(), node.clone());
+        self.worker_endpoints.insert(node_id.clone(), endpoint);
         self.node_last_seen_ms.insert(node_id, observed_at_ms);
 
         node
@@ -65,6 +67,10 @@ impl ControlState {
 
     pub fn node_last_seen_ms(&self, id: &NodeId) -> Option<u64> {
         self.node_last_seen_ms.get(id).copied()
+    }
+
+    pub fn worker_endpoint(&self, id: &NodeId) -> Option<&str> {
+        self.worker_endpoints.get(id).map(String::as_str)
     }
 
     pub fn register_node(&mut self, node: Node) -> Result<(), ControlError> {

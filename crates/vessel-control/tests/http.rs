@@ -467,7 +467,8 @@ async fn worker_can_register_through_cluster_protocol() {
 
     let app = test_app();
 
-    let registration = WorkerRegistration::new(node("cluster-node-01"));
+    let registration =
+        WorkerRegistration::new(node("cluster-node-01"), "http://cluster-node-01:7001");
 
     let body = serde_json::to_vec(&registration).unwrap();
 
@@ -509,7 +510,8 @@ async fn heartbeat_refreshes_registered_worker_over_http() {
 
     let app = test_app();
 
-    let registration = WorkerRegistration::new(node("cluster-node-01"));
+    let registration =
+        WorkerRegistration::new(node("cluster-node-01"), "http://cluster-node-01:7001");
 
     let body = serde_json::to_vec(&registration).unwrap();
 
