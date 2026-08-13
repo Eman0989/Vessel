@@ -937,3 +937,80 @@ async fn reconciling_missing_deployment_returns_not_found_over_http() {
             .contains("deployment missing was not found",)
     );
 }
+
+#[tokio::test]
+async fn deployment_reconciliation_schedules_replicas_when_node_is_available() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&node("node-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/nodes")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+    let instances = json.as_array().unwrap();
+
+    assert_eq!(instances.len(), 2);
+
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance["status"] == "assigned")
+    );
+
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance["node_id"] == "node-01")
+    );
+}

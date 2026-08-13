@@ -871,8 +871,6 @@ fn scale_down_cancels_excess_replicas_deterministically() {
 fn scale_down_prefers_pending_replica_over_assigned_replica() {
     let mut state = ControlState::new();
 
-    state.register_node(node("node-01")).unwrap();
-
     state.register_workload(workload("workload-01")).unwrap();
 
     state
@@ -882,6 +880,8 @@ fn scale_down_prefers_pending_replica_over_assigned_replica() {
     let replicas = state
         .reconcile_deployment(&DeploymentId::new("deployment-01"))
         .unwrap();
+
+    state.register_node(node("node-01")).unwrap();
 
     state.schedule_instance(&replicas[1].id).unwrap();
 
@@ -921,9 +921,13 @@ fn scale_down_to_zero_releases_reserved_node_capacity() {
         .reconcile_deployment(&DeploymentId::new("deployment-01"))
         .unwrap();
 
-    for replica in &replicas {
-        state.schedule_instance(&replica.id).unwrap();
-    }
+    assert_eq!(replicas.len(), 2);
+
+    assert!(
+        replicas
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Assigned })
+    );
 
     let node_before = state.node(&NodeId::new("node-01")).unwrap();
 
@@ -986,4 +990,144 @@ fn terminal_instance_transition_releases_reserved_capacity() {
     assert_eq!(node.allocated, ResourceRequest::default(),);
 
     assert_eq!(node.allocated_instances, 0,);
+}
+
+#[test]
+fn reconciliation_automatically_schedules_created_replicas() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 2);
+
+    assert!(
+        changed
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Assigned })
+    );
+
+    assert!(
+        changed
+            .iter()
+            .all(|instance| { instance.node_id == Some(NodeId::new("node-01")) })
+    );
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated, ResourceRequest::new(1_000, 134_217_728,),);
+
+    assert_eq!(node.allocated_instances, 2,);
+}
+
+#[test]
+fn reconciliation_keeps_replicas_pending_without_capacity() {
+    let mut state = ControlState::new();
+
+    let mut unavailable = node("node-01");
+    unavailable.status = NodeStatus::Draining;
+
+    state.register_node(unavailable).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 2);
+
+    assert!(
+        changed
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Pending })
+    );
+
+    assert!(changed.iter().all(|instance| instance.node_id.is_none()));
+}
+
+#[test]
+fn later_reconciliation_retries_existing_pending_replicas() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let first = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(first.len(), 2);
+
+    assert!(
+        first
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Pending })
+    );
+
+    state.register_node(node("node-01")).unwrap();
+
+    let second = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(second.len(), 2);
+
+    assert!(
+        second
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Assigned })
+    );
+
+    assert_eq!(state.instance_count(), 2,);
+}
+
+#[test]
+fn reconciliation_can_partially_schedule_when_capacity_is_limited() {
+    let mut state = ControlState::new();
+
+    let mut limited = node("node-01");
+    limited.capacity.max_instances = 1;
+
+    state.register_node(limited).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 2);
+
+    assert_eq!(changed[0].status, InstanceStatus::Assigned,);
+
+    assert_eq!(changed[1].status, InstanceStatus::Pending,);
+
+    assert_eq!(changed[0].node_id, Some(NodeId::new("node-01")),);
+
+    assert_eq!(changed[1].node_id, None,);
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated_instances, 1,);
 }

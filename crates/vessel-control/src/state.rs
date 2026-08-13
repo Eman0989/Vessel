@@ -5,7 +5,7 @@ use vessel_core::{
     NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
-use vessel_scheduler::Scheduler;
+use vessel_scheduler::{Scheduler, SchedulerError};
 
 use crate::ControlError;
 
@@ -212,6 +212,8 @@ impl ControlState {
             .cloned()
             .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
 
+        let mut changed = BTreeMap::<InstanceId, Instance>::new();
+
         let mut active = self
             .instances
             .values()
@@ -237,8 +239,6 @@ impl ControlState {
 
             let missing_replicas = deployment.desired_replicas - active_replicas;
 
-            let mut changed = Vec::new();
-
             for _ in 0..missing_replicas {
                 let instance = Instance {
                     id: self.next_replica_id(&deployment.id),
@@ -252,17 +252,9 @@ impl ControlState {
 
                 self.instances.insert(instance.id.clone(), instance.clone());
 
-                changed.push(instance);
+                changed.insert(instance.id.clone(), instance);
             }
-
-            if let Some(deployment) = self.deployments.get_mut(id) {
-                deployment.status = DeploymentStatus::Progressing;
-            }
-
-            return Ok(changed);
-        }
-
-        if active_replicas > deployment.desired_replicas {
+        } else if active_replicas > deployment.desired_replicas {
             let excess = active_replicas - deployment.desired_replicas;
 
             active.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
@@ -271,20 +263,45 @@ impl ControlState {
                     .then_with(|| left_id.cmp(right_id))
             });
 
-            let mut changed = Vec::new();
-
             for (_, instance_id) in active.into_iter().take(excess as usize) {
-                changed.push(self.transition_instance(&instance_id, InstanceStatus::Cancelled)?);
-            }
+                let instance = self.transition_instance(&instance_id, InstanceStatus::Cancelled)?;
 
-            if let Some(deployment) = self.deployments.get_mut(id) {
-                deployment.status = DeploymentStatus::Progressing;
+                changed.insert(instance.id.clone(), instance);
             }
-
-            return Ok(changed);
         }
 
-        Ok(Vec::new())
+        let pending_ids = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id
+                    && instance.status == InstanceStatus::Pending
+            })
+            .map(|instance| instance.id.clone())
+            .collect::<Vec<_>>();
+
+        for instance_id in pending_ids {
+            match self.schedule_instance(&instance_id) {
+                Ok(instance) => {
+                    changed.insert(instance.id.clone(), instance);
+                }
+
+                Err(ControlError::Scheduler(SchedulerError::NoEligibleNodes { .. })) => {
+                    // Lack of cluster capacity is not a reconciliation
+                    // failure. Keep this replica pending for a later pass.
+                }
+
+                Err(error) => return Err(error),
+            }
+        }
+
+        if !changed.is_empty()
+            && let Some(deployment) = self.deployments.get_mut(id)
+        {
+            deployment.status = DeploymentStatus::Progressing;
+        }
+
+        Ok(changed.into_values().collect())
     }
 
     pub fn scale_deployment(
