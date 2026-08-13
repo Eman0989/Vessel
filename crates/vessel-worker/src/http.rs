@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
+use vessel_core::{NodeStatus, ResourceCapacity, ResourceRequest};
 
 use crate::{ExecutionRequest, ExecutionResult, WorkerService};
 
@@ -18,6 +19,13 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct WorkerStatusResponse {
     pub node_id: String,
+    pub name: String,
+    pub region: String,
+    pub status: NodeStatus,
+    pub capacity: ResourceCapacity,
+    pub allocated: ResourceRequest,
+    pub available_capacity: ResourceCapacity,
+    pub allocated_instances: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,8 +46,17 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn status(State(worker): State<Arc<WorkerService>>) -> Json<WorkerStatusResponse> {
+    let node = worker.node();
+
     Json(WorkerStatusResponse {
-        node_id: worker.node_id().to_string(),
+        node_id: node.id.to_string(),
+        name: node.name.clone(),
+        region: node.region.clone(),
+        status: node.status,
+        capacity: node.capacity,
+        allocated: node.allocated,
+        available_capacity: worker.available_capacity(),
+        allocated_instances: node.allocated_instances,
     })
 }
 

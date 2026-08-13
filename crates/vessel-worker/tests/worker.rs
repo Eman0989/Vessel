@@ -34,3 +34,37 @@ fn worker_surfaces_runtime_execution_errors() {
 
     assert!(matches!(error, WorkerError::Runtime(_)));
 }
+
+#[test]
+fn worker_reports_configured_node_state_and_capacity() {
+    use vessel_core::{NodeStatus, ResourceCapacity};
+
+    let capacity = ResourceCapacity::new(4_000, 536_870_912, 8);
+
+    let config = WorkerConfig::new("worker-capacity-01")
+        .with_name("worker-east-01")
+        .with_region("eu-central")
+        .with_capacity(capacity);
+
+    let worker = WorkerService::new(config);
+
+    let node = worker.node();
+
+    assert_eq!(node.id.as_str(), "worker-capacity-01",);
+
+    assert_eq!(node.name, "worker-east-01",);
+
+    assert_eq!(node.region, "eu-central",);
+
+    assert_eq!(node.status, NodeStatus::Ready,);
+
+    assert_eq!(node.capacity, capacity,);
+
+    assert_eq!(node.allocated.cpu_millis, 0,);
+
+    assert_eq!(node.allocated.memory_bytes, 0,);
+
+    assert_eq!(node.allocated_instances, 0,);
+
+    assert_eq!(worker.available_capacity(), capacity,);
+}

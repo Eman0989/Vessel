@@ -5,6 +5,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
+use vessel_core::ResourceCapacity;
 use vessel_worker::{ExecutionRequest, ExecutionResult, WorkerConfig, WorkerService, router};
 
 const ADD_MODULE: &[u8] = br#"
@@ -20,7 +21,12 @@ const ADD_MODULE: &[u8] = br#"
 "#;
 
 fn test_app() -> axum::Router {
-    router(WorkerService::new(WorkerConfig::new("worker-http-01")))
+    let config = WorkerConfig::new("worker-http-01")
+        .with_name("http-worker")
+        .with_region("test-region")
+        .with_capacity(ResourceCapacity::new(2_000, 268_435_456, 4));
+
+    router(WorkerService::new(config))
 }
 
 #[tokio::test]
@@ -45,7 +51,7 @@ async fn health_endpoint_reports_ok() {
 }
 
 #[tokio::test]
-async fn status_endpoint_reports_worker_identity() {
+async fn status_endpoint_reports_worker_state_and_capacity() {
     let response = test_app()
         .oneshot(
             Request::builder()
@@ -62,7 +68,20 @@ async fn status_endpoint_reports_worker_identity() {
 
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["node_id"], "worker-http-01",);
+    assert_eq!(json["node_id"], "worker-http-01");
+    assert_eq!(json["name"], "http-worker");
+    assert_eq!(json["region"], "test-region");
+    assert_eq!(json["status"], "ready");
+
+    assert_eq!(json["capacity"]["cpu_millis"], 2_000,);
+    assert_eq!(json["capacity"]["memory_bytes"], 268_435_456_u64,);
+    assert_eq!(json["capacity"]["max_instances"], 4,);
+
+    assert_eq!(json["allocated"]["cpu_millis"], 0,);
+    assert_eq!(json["allocated"]["memory_bytes"], 0,);
+    assert_eq!(json["allocated_instances"], 0,);
+
+    assert_eq!(json["available_capacity"], json["capacity"],);
 }
 
 #[tokio::test]

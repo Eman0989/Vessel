@@ -1,27 +1,45 @@
-use vessel_core::NodeId;
+use std::collections::BTreeMap;
+
+use vessel_core::{Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest};
 use vessel_runtime::WasmRuntime;
 
 use crate::{ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError};
 
 pub struct WorkerService {
-    config: WorkerConfig,
+    node: Node,
     runtime: WasmRuntime,
 }
 
 impl WorkerService {
     pub fn new(config: WorkerConfig) -> Self {
-        Self {
-            config,
-            runtime: WasmRuntime::new(),
-        }
+        Self::with_runtime(config, WasmRuntime::new())
     }
 
     pub fn with_runtime(config: WorkerConfig, runtime: WasmRuntime) -> Self {
-        Self { config, runtime }
+        let node = Node {
+            id: config.node_id,
+            name: config.name,
+            region: config.region,
+            status: NodeStatus::Ready,
+            capacity: config.capacity,
+            allocated: ResourceRequest::default(),
+            allocated_instances: 0,
+            labels: BTreeMap::new(),
+        };
+
+        Self { node, runtime }
     }
 
     pub fn node_id(&self) -> &NodeId {
-        &self.config.node_id
+        &self.node.id
+    }
+
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+
+    pub fn available_capacity(&self) -> ResourceCapacity {
+        self.node.available_capacity()
     }
 
     pub fn execute(&self, request: &ExecutionRequest) -> Result<ExecutionResult, WorkerError> {
@@ -33,7 +51,7 @@ impl WorkerService {
         )?;
 
         Ok(ExecutionResult {
-            node_id: self.config.node_id.clone(),
+            node_id: self.node.id.clone(),
             value,
         })
     }
