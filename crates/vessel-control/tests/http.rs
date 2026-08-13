@@ -1143,3 +1143,311 @@ async fn assigned_instance_invocation_is_forwarded_to_worker() {
 
     worker_server.abort();
 }
+
+#[tokio::test]
+async fn invoking_missing_instance_returns_not_found() {
+    let request = ExecutionRequest::new(b"unused", "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/missing/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("instance missing was not found")
+    );
+}
+
+#[tokio::test]
+async fn pending_instance_cannot_be_invoked() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body =
+        serde_json::to_vec(&instance("instance-01", "deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let request = ExecutionRequest::new(b"unused", "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/instance-01/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let json = body_json(response).await;
+
+    assert!(json["error"].as_str().unwrap().contains("not invokable"));
+}
+
+#[tokio::test]
+async fn invoking_instance_without_worker_endpoint_returns_service_unavailable() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&node("node-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/nodes")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut deployment = deployment("deployment-01", "workload-01");
+
+    deployment.desired_replicas = 1;
+
+    let body = serde_json::to_vec(&deployment).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let reconciled = body_json(response).await;
+
+    assert_eq!(reconciled[0]["status"], "assigned");
+    assert_eq!(reconciled[0]["node_id"], "node-01");
+
+    let request = ExecutionRequest::new(b"unused", "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/deployment-01-replica-1/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("worker endpoint for node node-01 is unavailable")
+    );
+}
+
+#[tokio::test]
+async fn worker_execution_failure_is_propagated_through_gateway() {
+    const ADD_MODULE: &[u8] = br#"
+(module
+  (func (export "add")
+    (param i32 i32)
+    (result i32)
+    local.get 0
+    local.get 1
+    i32.add
+  )
+)
+"#;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker_endpoint = format!("http://{address}");
+
+    let worker =
+        WorkerService::new(WorkerConfig::new("gateway-node-01").with_endpoint(worker_endpoint));
+
+    let registration = worker.registration().unwrap();
+
+    let worker_server = tokio::spawn(async move {
+        axum::serve(listener, worker_router(worker)).await.unwrap();
+    });
+
+    let app = test_app();
+
+    let body = serde_json::to_vec(&registration).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut deployment = deployment("deployment-01", "workload-01");
+
+    deployment.desired_replicas = 1;
+
+    let body = serde_json::to_vec(&deployment).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let request = ExecutionRequest::new(ADD_MODULE, "missing-export", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/deployment-01-replica-1/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let json = body_json(response).await;
+
+    assert!(!json["error"].as_str().unwrap().is_empty());
+
+    worker_server.abort();
+}
