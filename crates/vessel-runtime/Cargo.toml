@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 thiserror.workspace = true
 wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+vessel-policy = { path = "../vessel-policy" }

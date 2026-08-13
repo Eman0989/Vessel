@@ -1,5 +1,8 @@
 use std::time::Duration;
+
+use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -30,10 +33,12 @@ impl Default for RuntimeLimits {
 
 pub(crate) struct StoreState {
     pub(crate) limits: StoreLimits,
+    pub(crate) wasi: WasiCtx,
+    pub(crate) table: ResourceTable,
 }
 
 impl StoreState {
-    pub(crate) fn new(config: RuntimeLimits) -> Self {
+    pub(crate) fn new(config: RuntimeLimits, wasi: WasiCtx) -> Self {
         let limits = StoreLimitsBuilder::new()
             .memory_size(config.memory_bytes)
             .instances(config.max_instances)
@@ -43,6 +48,19 @@ impl StoreState {
             .trap_on_grow_failure(true)
             .build();
 
-        Self { limits }
+        Self {
+            limits,
+            wasi,
+            table: ResourceTable::new(),
+        }
+    }
+}
+
+impl WasiView for StoreState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }

@@ -2,6 +2,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("capability policy is invalid: {0}")]
+    Policy(#[from] vessel_policy::PolicyError),
+
+    #[error("failed to construct WASI capability context: {0}")]
+    WasiContext(#[source] wasmtime::Error),
+
+    #[error("failed to configure WASI linker: {0}")]
+    WasiLinker(#[source] wasmtime::Error),
+
     #[error("failed to initialize WebAssembly runtime: {0}")]
     Initialize(#[source] wasmtime::Error),
 

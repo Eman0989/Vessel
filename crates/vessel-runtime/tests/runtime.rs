@@ -335,3 +335,93 @@ fn runtime_remains_usable_after_timeout() {
 
     assert_eq!(result, 42);
 }
+
+const WASI_ENVIRONMENT_COMPONENT: &str = r#"
+(component
+    (import "wasi:cli/environment@0.2.12"
+        (instance
+            (export "get-environment"
+                (func
+                    (result
+                        (list
+                            (tuple string string)
+                        )
+                    )
+                )
+            )
+
+            (export "get-arguments"
+                (func
+                    (result (list string))
+                )
+            )
+
+            (export "initial-cwd"
+                (func
+                    (result (option string))
+                )
+            )
+        )
+    )
+)
+"#;
+
+#[test]
+fn default_wasi_policy_exposes_no_environment() {
+    let runtime = WasmRuntime::new();
+
+    let environment = runtime
+        .invoke_wasi_environment(WASI_ENVIRONMENT_COMPONENT.as_bytes())
+        .unwrap();
+
+    assert!(environment.is_empty());
+}
+
+#[test]
+fn explicit_wasi_environment_is_visible() {
+    use std::collections::BTreeMap;
+
+    use vessel_policy::CapabilityPolicy;
+
+    let mut environment = BTreeMap::new();
+
+    environment.insert("VESSEL_MODE".to_string(), "sandbox".to_string());
+
+    let policy = CapabilityPolicy {
+        environment,
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let environment = runtime
+        .invoke_wasi_environment(WASI_ENVIRONMENT_COMPONENT.as_bytes())
+        .unwrap();
+
+    assert_eq!(
+        environment,
+        vec![("VESSEL_MODE".to_string(), "sandbox".to_string(),)]
+    );
+}
+
+#[test]
+fn invalid_preopen_fails_before_guest_execution() {
+    use std::path::PathBuf;
+
+    use vessel_policy::{CapabilityPolicy, DirectoryAccess, DirectoryCapability};
+
+    let policy = CapabilityPolicy {
+        directories: vec![DirectoryCapability {
+            host_path: PathBuf::from("/this/vessel/path/does/not/exist"),
+            guest_path: "/data".to_string(),
+            access: DirectoryAccess::ReadOnly,
+        }],
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let result = runtime.invoke_wasi_environment(WASI_ENVIRONMENT_COMPONENT.as_bytes());
+
+    assert!(matches!(result, Err(RuntimeError::WasiContext(_))));
+}

@@ -3,13 +3,16 @@ use crate::{
     bindings::VesselWorkload,
     limits::{EPOCH_TICK_INTERVAL, StoreState},
 };
+use vessel_policy::{CapabilityPolicy, DirectoryAccess, NetworkAccess};
 use wasmtime::component::{Component, Linker as ComponentLinker};
 use wasmtime::{Config, Engine, Instance, Module, Store, Trap};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
 #[derive(Clone)]
 pub struct WasmRuntime {
     engine: Engine,
     limits: RuntimeLimits,
+    policy: CapabilityPolicy,
 }
 
 impl WasmRuntime {
@@ -19,6 +22,15 @@ impl WasmRuntime {
     }
 
     pub fn with_limits(limits: RuntimeLimits) -> Result<Self, RuntimeError> {
+        Self::with_limits_and_policy(limits, CapabilityPolicy::deny_all())
+    }
+
+    pub fn with_limits_and_policy(
+        limits: RuntimeLimits,
+        policy: CapabilityPolicy,
+    ) -> Result<Self, RuntimeError> {
+        policy.validate()?;
+
         let mut config = Config::new();
 
         config.consume_fuel(true);
@@ -28,7 +40,11 @@ impl WasmRuntime {
 
         Self::start_epoch_ticker(&engine);
 
-        Ok(Self { engine, limits })
+        Ok(Self {
+            engine,
+            limits,
+            policy,
+        })
     }
 
     fn start_epoch_ticker(engine: &Engine) {
@@ -60,8 +76,60 @@ impl WasmRuntime {
         u64::try_from(self.limits.timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
+    fn build_wasi_ctx(&self) -> Result<WasiCtx, RuntimeError> {
+        let mut builder = WasiCtxBuilder::new();
+
+        for (name, value) in &self.policy.environment {
+            builder.env(name, value);
+        }
+
+        for directory in &self.policy.directories {
+            let (dir_perms, file_perms) = match directory.access {
+                DirectoryAccess::ReadOnly => (DirPerms::READ, FilePerms::READ),
+
+                DirectoryAccess::ReadWrite => (
+                    DirPerms::READ | DirPerms::MUTATE,
+                    FilePerms::READ | FilePerms::WRITE,
+                ),
+            };
+
+            builder
+                .preopened_dir(
+                    &directory.host_path,
+                    &directory.guest_path,
+                    dir_perms,
+                    file_perms,
+                )
+                .map_err(RuntimeError::WasiContext)?;
+        }
+
+        match self.policy.network {
+            NetworkAccess::DenyAll => {
+                builder.allow_tcp(false);
+                builder.allow_udp(false);
+                builder.allow_ip_name_lookup(false);
+            }
+
+            NetworkAccess::AllowAll => {
+                builder.inherit_network();
+                builder.allow_ip_name_lookup(true);
+            }
+        }
+
+        Ok(builder.build())
+    }
+
+    fn component_linker(&self) -> Result<ComponentLinker<StoreState>, RuntimeError> {
+        let mut linker = ComponentLinker::<StoreState>::new(&self.engine);
+
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(RuntimeError::WasiLinker)?;
+
+        Ok(linker)
+    }
+
     fn new_store(&self) -> Result<Store<StoreState>, RuntimeError> {
-        let state = StoreState::new(self.limits);
+        let wasi = self.build_wasi_ctx()?;
+        let state = StoreState::new(self.limits, wasi);
 
         let mut store = Store::new(&self.engine, state);
 
@@ -135,7 +203,7 @@ impl WasmRuntime {
         let component = Component::new(&self.engine, component_bytes)
             .map_err(RuntimeError::ComponentCompile)?;
 
-        let linker = ComponentLinker::<StoreState>::new(&self.engine);
+        let linker = self.component_linker()?;
 
         let mut store = self.new_store()?;
 
@@ -166,7 +234,7 @@ impl WasmRuntime {
         let component = Component::new(&self.engine, component_bytes)
             .map_err(RuntimeError::ComponentCompile)?;
 
-        let linker = ComponentLinker::<StoreState>::new(&self.engine);
+        let linker = self.component_linker()?;
 
         let mut store = self.new_store()?;
 
@@ -176,6 +244,30 @@ impl WasmRuntime {
         bindings
             .call_add(&mut store, lhs, rhs)
             .map_err(|error| self.map_component_execute_error(error))
+    }
+
+    pub fn invoke_wasi_environment(
+        &self,
+        component_bytes: &[u8],
+    ) -> Result<Vec<(String, String)>, RuntimeError> {
+        let component = Component::new(&self.engine, component_bytes)
+            .map_err(RuntimeError::ComponentCompile)?;
+
+        let linker = self.component_linker()?;
+        let mut store = self.new_store()?;
+
+        linker
+            .instantiate(&mut store, &component)
+            .map_err(RuntimeError::ComponentInstantiate)?;
+
+        let mut cli = wasmtime_wasi::cli::WasiCliView::cli(store.data_mut());
+
+        wasmtime_wasi::p2::bindings::cli::environment::Host::get_environment(&mut cli)
+            .map_err(RuntimeError::WasiContext)
+    }
+
+    pub fn policy(&self) -> &CapabilityPolicy {
+        &self.policy
     }
 
     pub fn limits(&self) -> RuntimeLimits {
