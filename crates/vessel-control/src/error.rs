@@ -1,5 +1,6 @@
 use thiserror::Error;
 use vessel_core::{CoreError, DeploymentId, InstanceId, NodeId, WorkloadId};
+use vessel_scheduler::SchedulerError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlError {
@@ -41,4 +42,7 @@ pub enum ControlError {
 
     #[error(transparent)]
     Core(#[from] CoreError),
+
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
 }

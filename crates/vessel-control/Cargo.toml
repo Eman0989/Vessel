@@ -9,6 +9,7 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 vessel-core = { path = "../vessel-core" }
+vessel-scheduler = { path = "../vessel-scheduler" }
 
 [dev-dependencies]
 http-body-util.workspace = true

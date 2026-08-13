@@ -1847,6 +1847,7 @@ dependencies = [
  "tokio",
  "tower",
  "vessel-core",
+ "vessel-scheduler",
 ]
 
 [[package]]

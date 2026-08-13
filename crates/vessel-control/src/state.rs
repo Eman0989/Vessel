@@ -5,6 +5,8 @@ use vessel_core::{
     WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
+use vessel_scheduler::Scheduler;
+
 use crate::ControlError;
 
 #[derive(Debug, Default)]
@@ -191,18 +193,55 @@ impl ControlState {
         instance_id: &InstanceId,
         node_id: &NodeId,
     ) -> Result<Instance, ControlError> {
-        if !self.nodes.contains_key(node_id) {
-            return Err(ControlError::NodeNotFound(node_id.clone()));
-        }
-
-        let instance = self
+        let resources = self
             .instances
-            .get_mut(instance_id)
-            .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
+            .get(instance_id)
+            .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?
+            .resources;
 
-        instance.assign_to(node_id.clone())?;
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| ControlError::NodeNotFound(node_id.clone()))?;
 
-        Ok(instance.clone())
+        node.try_allocate(&resources)?;
+
+        let assignment = {
+            let instance = self
+                .instances
+                .get_mut(instance_id)
+                .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
+
+            instance
+                .assign_to(node_id.clone())
+                .map(|()| instance.clone())
+        };
+
+        match assignment {
+            Ok(instance) => Ok(instance),
+
+            Err(error) => {
+                node.release(&resources);
+                Err(error.into())
+            }
+        }
+    }
+
+    pub fn schedule_instance(
+        &mut self,
+        instance_id: &InstanceId,
+    ) -> Result<Instance, ControlError> {
+        let resources = self
+            .instances
+            .get(instance_id)
+            .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?
+            .resources;
+
+        let nodes = self.list_nodes();
+
+        let decision = Scheduler::new().select_node(&nodes, &resources)?;
+
+        self.assign_instance(instance_id, &decision.node_id)
     }
 
     pub fn transition_instance(

@@ -65,6 +65,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/deployments/{id}/scale", post(scale_deployment))
         .route("/v1/instances", get(list_instances).post(create_instance))
         .route("/v1/instances/{id}/assign", post(assign_instance))
+        .route("/v1/instances/{id}/schedule", post(schedule_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
         .with_state(Arc::new(Mutex::new(state)))
 }
@@ -95,6 +96,8 @@ fn control_error_response(error: ControlError) -> ApiError {
         ControlError::InstanceWorkloadMismatch { .. }
         | ControlError::InstanceAssignmentRequiresNode(_)
         | ControlError::Core(_) => StatusCode::UNPROCESSABLE_ENTITY,
+
+        ControlError::Scheduler(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
 
     (
@@ -245,6 +248,17 @@ async fn assign_instance(
 ) -> Result<Json<Instance>, ApiError> {
     let instance = lock_state(&state)?
         .assign_instance(&InstanceId::new(id), &request.node_id)
+        .map_err(control_error_response)?;
+
+    Ok(Json(instance))
+}
+
+async fn schedule_instance(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Instance>, ApiError> {
+    let instance = lock_state(&state)?
+        .schedule_instance(&InstanceId::new(id))
         .map_err(control_error_response)?;
 
     Ok(Json(instance))

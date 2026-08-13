@@ -585,3 +585,205 @@ async fn heartbeat_from_unknown_worker_returns_not_found() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND,);
 }
+
+#[tokio::test]
+async fn pending_instance_can_be_scheduled_over_http() {
+    let app = test_app();
+
+    for node in [
+        {
+            let mut node = node("node-low");
+            node.allocated = ResourceRequest::new(3_000, 268_435_456);
+            node.allocated_instances = 4;
+            node
+        },
+        node("node-high"),
+    ] {
+        let body = serde_json::to_vec(&node).unwrap();
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/nodes")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body =
+        serde_json::to_vec(&instance("instance-01", "deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/instance-01/schedule")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK,);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["status"], "assigned",);
+
+    assert_eq!(json["node_id"], "node-high",);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/nodes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let nodes = body_json(response).await;
+
+    let selected = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "node-high")
+        .unwrap();
+
+    assert_eq!(selected["allocated"]["cpu_millis"], 500,);
+
+    assert_eq!(selected["allocated_instances"], 1,);
+}
+
+#[tokio::test]
+async fn scheduling_without_eligible_node_returns_service_unavailable() {
+    let app = test_app();
+
+    let mut draining = node("node-01");
+    draining.status = NodeStatus::Draining;
+
+    let body = serde_json::to_vec(&draining).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/nodes")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body =
+        serde_json::to_vec(&instance("instance-01", "deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/instance-01/schedule")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("no eligible node",)
+    );
+}

@@ -531,3 +531,145 @@ fn heartbeat_from_unknown_worker_is_rejected() {
         ControlError::NodeNotFound(NodeId::new("missing-node"),),
     );
 }
+
+#[test]
+fn manual_assignment_reserves_node_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated, ResourceRequest::new(500, 67_108_864,),);
+
+    assert_eq!(node.allocated_instances, 1,);
+}
+
+#[test]
+fn failed_assignment_rolls_back_extra_reservation() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    let error = state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ControlError::Core(vessel_core::CoreError::InvalidInstanceTransition {
+            from: InstanceStatus::Assigned,
+            to: InstanceStatus::Assigned,
+        })
+    ));
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated, ResourceRequest::new(500, 67_108_864,),);
+
+    assert_eq!(node.allocated_instances, 1,);
+}
+
+#[test]
+fn scheduler_assigns_instance_to_best_node_and_reserves_capacity() {
+    let mut state = ControlState::new();
+
+    let mut low = node("node-low");
+    low.allocated = ResourceRequest::new(3_000, 268_435_456);
+    low.allocated_instances = 4;
+
+    let high = node("node-high");
+
+    state.register_node(low).unwrap();
+    state.register_node(high).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let scheduled = state
+        .schedule_instance(&InstanceId::new("instance-01"))
+        .unwrap();
+
+    assert_eq!(scheduled.status, InstanceStatus::Assigned,);
+
+    assert_eq!(scheduled.node_id, Some(NodeId::new("node-high")),);
+
+    let selected = state.node(&NodeId::new("node-high")).unwrap();
+
+    assert_eq!(selected.allocated, ResourceRequest::new(500, 67_108_864,),);
+
+    assert_eq!(selected.allocated_instances, 1,);
+}
+
+#[test]
+fn scheduler_failure_leaves_instance_pending_and_capacity_unchanged() {
+    let mut state = ControlState::new();
+
+    let mut unavailable = node("node-01");
+    unavailable.status = NodeStatus::Draining;
+
+    state.register_node(unavailable).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .schedule_instance(&InstanceId::new("instance-01"))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ControlError::Scheduler(vessel_scheduler::SchedulerError::NoEligibleNodes { .. })
+    ));
+
+    let stored = state.instance(&InstanceId::new("instance-01")).unwrap();
+
+    assert_eq!(stored.status, InstanceStatus::Pending,);
+
+    assert_eq!(stored.node_id, None);
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated, ResourceRequest::default(),);
+
+    assert_eq!(node.allocated_instances, 0,);
+}
