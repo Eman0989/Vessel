@@ -1590,6 +1590,11 @@ version = "0.1.0"
 [[package]]
 name = "vessel-worker"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "vessel-core",
+ "vessel-runtime",
+]
 
 [[package]]
 name = "wasi"
