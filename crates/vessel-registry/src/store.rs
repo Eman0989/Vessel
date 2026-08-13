@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use vessel_core::ArtifactRef;
 
 use crate::RegistryError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StoredArtifact {
     pub artifact: ArtifactRef,
     pub size_bytes: usize,

@@ -1871,8 +1871,14 @@ dependencies = [
 name = "vessel-registry"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "http-body-util",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokio",
+ "tower",
  "vessel-core",
 ]
 
