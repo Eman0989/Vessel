@@ -1772,7 +1772,13 @@ version = "0.1.0"
 name = "vessel-control"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "http-body-util",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "tower",
  "vessel-core",
 ]
 

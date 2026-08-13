@@ -1,10 +1,20 @@
-use vessel_control::ControlState;
+use std::{env, error::Error};
 
-fn main() {
-    let state = ControlState::new();
+use tokio::net::TcpListener;
+use vessel_control::{ControlState, router};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let address = env::var("VESSEL_CONTROL_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
+
+    let listener = TcpListener::bind(&address).await?;
 
     println!(
-        "VESSEL control plane ready with {} nodes",
-        state.node_count(),
+        "VESSEL control plane listening on {}",
+        listener.local_addr()?,
     );
+
+    axum::serve(listener, router(ControlState::new())).await?;
+
+    Ok(())
 }
