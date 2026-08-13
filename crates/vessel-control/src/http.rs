@@ -63,6 +63,7 @@ pub fn router(state: ControlState) -> Router {
             get(list_deployments).post(create_deployment),
         )
         .route("/v1/deployments/{id}/scale", post(scale_deployment))
+        .route("/v1/deployments/{id}/reconcile", post(reconcile_deployment))
         .route("/v1/instances", get(list_instances).post(create_instance))
         .route("/v1/instances/{id}/assign", post(assign_instance))
         .route("/v1/instances/{id}/schedule", post(schedule_instance))
@@ -220,6 +221,17 @@ async fn scale_deployment(
         .map_err(control_error_response)?;
 
     Ok(Json(deployment))
+}
+
+async fn reconcile_deployment(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<Instance>>, ApiError> {
+    let instances = lock_state(&state)?
+        .reconcile_deployment(&DeploymentId::new(id))
+        .map_err(control_error_response)?;
+
+    Ok(Json(instances))
 }
 
 async fn list_instances(State(state): State<SharedState>) -> Result<Json<Vec<Instance>>, ApiError> {

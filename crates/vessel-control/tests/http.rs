@@ -787,3 +787,153 @@ async fn scheduling_without_eligible_node_returns_service_unavailable() {
             .contains("no eligible node",)
     );
 }
+
+#[tokio::test]
+async fn deployment_can_be_reconciled_over_http() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK,);
+
+    let json = body_json(response).await;
+    let created = json.as_array().unwrap();
+
+    assert_eq!(created.len(), 2);
+
+    assert_eq!(created[0]["id"], "deployment-01-replica-1",);
+
+    assert_eq!(created[1]["id"], "deployment-01-replica-2",);
+
+    assert_eq!(created[0]["status"], "pending",);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/instances")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let instances = body_json(response).await;
+
+    assert_eq!(instances.as_array().unwrap().len(), 2,);
+}
+
+#[tokio::test]
+async fn repeated_deployment_reconciliation_is_idempotent_over_http() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for expected_count in [2, 0] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/deployments/deployment-01/reconcile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK,);
+
+        let json = body_json(response).await;
+
+        assert_eq!(json.as_array().unwrap().len(), expected_count,);
+    }
+}
+
+#[tokio::test]
+async fn reconciling_missing_deployment_returns_not_found_over_http() {
+    let response = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/missing/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("deployment missing was not found",)
+    );
+}

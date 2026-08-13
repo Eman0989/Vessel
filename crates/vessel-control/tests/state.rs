@@ -673,3 +673,153 @@ fn scheduler_failure_leaves_instance_pending_and_capacity_unchanged() {
 
     assert_eq!(node.allocated_instances, 0,);
 }
+
+#[test]
+fn reconciliation_creates_missing_pending_replicas() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let created = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(created.len(), 2);
+    assert_eq!(state.instance_count(), 2);
+
+    assert_eq!(created[0].id, InstanceId::new("deployment-01-replica-1",),);
+
+    assert_eq!(created[1].id, InstanceId::new("deployment-01-replica-2",),);
+
+    for replica in &created {
+        assert_eq!(replica.status, InstanceStatus::Pending,);
+
+        assert_eq!(replica.node_id, None);
+
+        assert_eq!(replica.workload_id, WorkloadId::new("workload-01"),);
+
+        assert_eq!(replica.resources, ResourceRequest::new(500, 67_108_864,),);
+    }
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01",),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Progressing,
+    );
+}
+
+#[test]
+fn reconciliation_is_idempotent_when_replica_count_is_satisfied() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let first = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let second = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(first.len(), 2);
+    assert!(second.is_empty());
+    assert_eq!(state.instance_count(), 2);
+}
+
+#[test]
+fn terminal_replica_is_replaced_during_reconciliation() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let created = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .transition_instance(&created[0].id, InstanceStatus::Failed)
+        .unwrap();
+
+    let replacement = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(replacement.len(), 1);
+
+    assert_eq!(
+        replacement[0].id,
+        InstanceId::new("deployment-01-replica-3",),
+    );
+
+    assert_eq!(replacement[0].status, InstanceStatus::Pending,);
+
+    assert_eq!(state.instance_count(), 3);
+}
+
+#[test]
+fn reconciliation_counts_only_instances_from_target_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-a", "workload-01"))
+        .unwrap();
+
+    state
+        .create_deployment(deployment("deployment-b", "workload-01"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-a"))
+        .unwrap();
+
+    let created_for_b = state
+        .reconcile_deployment(&DeploymentId::new("deployment-b"))
+        .unwrap();
+
+    assert_eq!(created_for_b.len(), 2);
+
+    assert_eq!(
+        created_for_b[0].deployment_id,
+        DeploymentId::new("deployment-b"),
+    );
+
+    assert_eq!(
+        created_for_b[1].deployment_id,
+        DeploymentId::new("deployment-b"),
+    );
+
+    assert_eq!(state.instance_count(), 4);
+}
+
+#[test]
+fn reconciling_missing_deployment_is_rejected() {
+    let mut state = ControlState::new();
+
+    let error = state
+        .reconcile_deployment(&DeploymentId::new("missing-deployment"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment",),),
+    );
+
+    assert_eq!(state.instance_count(), 0);
+}

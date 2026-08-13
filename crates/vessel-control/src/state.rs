@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use vessel_core::{
-    Deployment, DeploymentId, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
-    WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
+    Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus, Node, NodeId,
+    NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
 use vessel_scheduler::Scheduler;
@@ -171,6 +171,76 @@ impl ControlState {
         node.status = status;
 
         Ok(node.clone())
+    }
+
+    fn next_replica_id(&self, deployment_id: &DeploymentId) -> InstanceId {
+        let mut ordinal = 1_u64;
+
+        loop {
+            let candidate =
+                InstanceId::new(format!("{}-replica-{ordinal}", deployment_id.as_str()));
+
+            if !self.instances.contains_key(&candidate) {
+                return candidate;
+            }
+
+            ordinal += 1;
+        }
+    }
+
+    pub fn reconcile_deployment(
+        &mut self,
+        id: &DeploymentId,
+    ) -> Result<Vec<Instance>, ControlError> {
+        let deployment = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        let workload = self
+            .workloads
+            .get(&deployment.workload_id)
+            .cloned()
+            .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
+
+        let active_replicas = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id && !instance.status.is_terminal()
+            })
+            .count() as u32;
+
+        let missing_replicas = deployment.desired_replicas.saturating_sub(active_replicas);
+
+        if missing_replicas == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut created = Vec::new();
+
+        for _ in 0..missing_replicas {
+            let instance = Instance {
+                id: self.next_replica_id(&deployment.id),
+                deployment_id: deployment.id.clone(),
+                workload_id: deployment.workload_id.clone(),
+                node_id: None,
+                status: InstanceStatus::Pending,
+                resources: workload.spec.resources,
+                restart_count: 0,
+            };
+
+            self.instances.insert(instance.id.clone(), instance.clone());
+
+            created.push(instance);
+        }
+
+        if let Some(deployment) = self.deployments.get_mut(id) {
+            deployment.status = DeploymentStatus::Progressing;
+        }
+
+        Ok(created)
     }
 
     pub fn scale_deployment(
