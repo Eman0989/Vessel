@@ -203,3 +203,243 @@ fn valid_instance_is_stored() {
 
     assert!(state.instance(&InstanceId::new("instance-01")).is_some());
 }
+
+#[test]
+fn control_state_lists_resources_in_id_order() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-02")).unwrap();
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-02")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    let nodes = state.list_nodes();
+    let workloads = state.list_workloads();
+
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(workloads.len(), 2);
+
+    assert_eq!(nodes[0].id, NodeId::new("node-01"),);
+
+    assert_eq!(nodes[1].id, NodeId::new("node-02"),);
+
+    assert_eq!(workloads[0].id, WorkloadId::new("workload-01"),);
+
+    assert_eq!(workloads[1].id, WorkloadId::new("workload-02"),);
+}
+
+#[test]
+fn node_status_can_be_updated() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    let updated = state
+        .update_node_status(&NodeId::new("node-01"), NodeStatus::Draining)
+        .unwrap();
+
+    assert_eq!(updated.status, NodeStatus::Draining,);
+
+    assert_eq!(
+        state.node(&NodeId::new("node-01")).unwrap().status,
+        NodeStatus::Draining,
+    );
+}
+
+#[test]
+fn updating_missing_node_is_rejected() {
+    let mut state = ControlState::new();
+
+    let error = state
+        .update_node_status(&NodeId::new("missing-node"), NodeStatus::Draining)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::NodeNotFound(NodeId::new("missing-node"),),
+    );
+}
+
+#[test]
+fn deployment_can_be_scaled() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let updated = state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 5)
+        .unwrap();
+
+    assert_eq!(updated.desired_replicas, 5);
+    assert_eq!(updated.generation, 2);
+
+    assert_eq!(updated.status, DeploymentStatus::Progressing,);
+}
+
+#[test]
+fn scaling_to_same_replica_count_preserves_generation() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let updated = state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 2)
+        .unwrap();
+
+    assert_eq!(updated.desired_replicas, 2);
+    assert_eq!(updated.generation, 1);
+
+    assert_eq!(updated.status, DeploymentStatus::Pending,);
+}
+
+#[test]
+fn instance_can_be_assigned_to_existing_node() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let assigned = state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    assert_eq!(assigned.status, InstanceStatus::Assigned,);
+
+    assert_eq!(assigned.node_id, Some(NodeId::new("node-01")),);
+}
+
+#[test]
+fn assigning_instance_to_missing_node_is_rejected() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .assign_instance(
+            &InstanceId::new("instance-01"),
+            &NodeId::new("missing-node"),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::NodeNotFound(NodeId::new("missing-node"),),
+    );
+}
+
+#[test]
+fn instance_lifecycle_can_advance_after_assignment() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    let starting = state
+        .transition_instance(&InstanceId::new("instance-01"), InstanceStatus::Starting)
+        .unwrap();
+
+    assert_eq!(starting.status, InstanceStatus::Starting,);
+
+    let running = state
+        .transition_instance(&InstanceId::new("instance-01"), InstanceStatus::Running)
+        .unwrap();
+
+    assert_eq!(running.status, InstanceStatus::Running,);
+}
+
+#[test]
+fn bare_assigned_transition_is_rejected() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .transition_instance(&InstanceId::new("instance-01"), InstanceStatus::Assigned)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::InstanceAssignmentRequiresNode(InstanceId::new("instance-01"),),
+    );
+
+    let stored = state.instance(&InstanceId::new("instance-01")).unwrap();
+
+    assert_eq!(stored.status, InstanceStatus::Pending,);
+
+    assert_eq!(stored.node_id, None);
+}
+
+#[test]
+fn invalid_instance_transition_surfaces_core_error() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .transition_instance(&InstanceId::new("instance-01"), InstanceStatus::Running)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::Core(vessel_core::CoreError::InvalidInstanceTransition {
+            from: InstanceStatus::Pending,
+            to: InstanceStatus::Running,
+        },),
+    );
+}

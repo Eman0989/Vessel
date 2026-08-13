@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use vessel_core::{
-    Deployment, DeploymentId, Instance, InstanceId, Node, NodeId, Workload, WorkloadId,
+    Deployment, DeploymentId, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
+    Workload, WorkloadId,
 };
 
 use crate::ControlError;
@@ -92,6 +93,92 @@ impl ControlState {
 
     pub fn instance(&self, id: &InstanceId) -> Option<&Instance> {
         self.instances.get(id)
+    }
+
+    pub fn list_nodes(&self) -> Vec<Node> {
+        self.nodes.values().cloned().collect()
+    }
+
+    pub fn list_workloads(&self) -> Vec<Workload> {
+        self.workloads.values().cloned().collect()
+    }
+
+    pub fn list_deployments(&self) -> Vec<Deployment> {
+        self.deployments.values().cloned().collect()
+    }
+
+    pub fn list_instances(&self) -> Vec<Instance> {
+        self.instances.values().cloned().collect()
+    }
+
+    pub fn update_node_status(
+        &mut self,
+        id: &NodeId,
+        status: NodeStatus,
+    ) -> Result<Node, ControlError> {
+        let node = self
+            .nodes
+            .get_mut(id)
+            .ok_or_else(|| ControlError::NodeNotFound(id.clone()))?;
+
+        node.status = status;
+
+        Ok(node.clone())
+    }
+
+    pub fn scale_deployment(
+        &mut self,
+        id: &DeploymentId,
+        replicas: u32,
+    ) -> Result<Deployment, ControlError> {
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.scale_to(replicas);
+
+        Ok(deployment.clone())
+    }
+
+    pub fn assign_instance(
+        &mut self,
+        instance_id: &InstanceId,
+        node_id: &NodeId,
+    ) -> Result<Instance, ControlError> {
+        if !self.nodes.contains_key(node_id) {
+            return Err(ControlError::NodeNotFound(node_id.clone()));
+        }
+
+        let instance = self
+            .instances
+            .get_mut(instance_id)
+            .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
+
+        instance.assign_to(node_id.clone())?;
+
+        Ok(instance.clone())
+    }
+
+    pub fn transition_instance(
+        &mut self,
+        instance_id: &InstanceId,
+        status: InstanceStatus,
+    ) -> Result<Instance, ControlError> {
+        if status == InstanceStatus::Assigned {
+            return Err(ControlError::InstanceAssignmentRequiresNode(
+                instance_id.clone(),
+            ));
+        }
+
+        let instance = self
+            .instances
+            .get_mut(instance_id)
+            .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
+
+        instance.transition_to(status)?;
+
+        Ok(instance.clone())
     }
 
     pub fn node_count(&self) -> usize {
