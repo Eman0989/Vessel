@@ -1,3 +1,4 @@
+mod artifact_cache;
 mod cluster_client;
 mod config;
 mod error;
@@ -5,6 +6,7 @@ mod execution;
 mod http;
 mod service;
 
+pub use artifact_cache::{ArtifactCache, ArtifactCacheError};
 pub use cluster_client::{ClusterClient, ClusterClientError};
 pub use config::WorkerConfig;
 pub use error::WorkerError;

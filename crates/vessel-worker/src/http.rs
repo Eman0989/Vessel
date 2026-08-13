@@ -52,6 +52,15 @@ fn worker_error_response(error: WorkerError) -> (StatusCode, Json<ErrorResponse>
         WorkerError::Core(_) => StatusCode::SERVICE_UNAVAILABLE,
         WorkerError::Runtime(_) => StatusCode::UNPROCESSABLE_ENTITY,
         WorkerError::StatePoisoned => StatusCode::INTERNAL_SERVER_ERROR,
+
+        WorkerError::ArtifactCache(error) => match error {
+            crate::ArtifactCacheError::CachePoisoned => StatusCode::INTERNAL_SERVER_ERROR,
+
+            crate::ArtifactCacheError::InvalidDigest { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+
+            crate::ArtifactCacheError::Http(_)
+            | crate::ArtifactCacheError::DigestMismatch { .. } => StatusCode::BAD_GATEWAY,
+        },
     };
 
     (

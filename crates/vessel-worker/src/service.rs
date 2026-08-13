@@ -4,24 +4,37 @@ use std::{
 };
 
 use vessel_core::{
-    Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, WorkerHeartbeat,
+    ArtifactRef, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, WorkerHeartbeat,
     WorkerRegistration,
 };
 use vessel_runtime::WasmRuntime;
 
-use crate::{ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError};
+use crate::{ArtifactCache, ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError};
 
 pub struct WorkerService {
     node: Mutex<Node>,
     runtime: WasmRuntime,
+    artifacts: ArtifactCache,
 }
 
 impl WorkerService {
     pub fn new(config: WorkerConfig) -> Self {
-        Self::with_runtime(config, WasmRuntime::new())
+        Self::with_runtime_and_registry(config, WasmRuntime::new(), "http://127.0.0.1:7002")
+    }
+
+    pub fn with_registry(config: WorkerConfig, registry_url: impl Into<String>) -> Self {
+        Self::with_runtime_and_registry(config, WasmRuntime::new(), registry_url)
     }
 
     pub fn with_runtime(config: WorkerConfig, runtime: WasmRuntime) -> Self {
+        Self::with_runtime_and_registry(config, runtime, "http://127.0.0.1:7002")
+    }
+
+    pub fn with_runtime_and_registry(
+        config: WorkerConfig,
+        runtime: WasmRuntime,
+        registry_url: impl Into<String>,
+    ) -> Self {
         let node = Node {
             id: config.node_id,
             name: config.name,
@@ -36,6 +49,7 @@ impl WorkerService {
         Self {
             node: Mutex::new(node),
             runtime,
+            artifacts: ArtifactCache::new(registry_url),
         }
     }
 
@@ -63,6 +77,14 @@ impl WorkerService {
         let node = self.node_snapshot()?;
 
         Ok(WorkerHeartbeat::from_node(&node))
+    }
+
+    pub async fn artifact(&self, artifact: &ArtifactRef) -> Result<Vec<u8>, WorkerError> {
+        Ok(self.artifacts.fetch(artifact).await?)
+    }
+
+    pub fn artifact_cache(&self) -> &ArtifactCache {
+        &self.artifacts
     }
 
     pub fn drain(&self) -> Result<(), WorkerError> {

@@ -12,12 +12,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let control_url =
         env::var("VESSEL_CONTROL_URL").unwrap_or_else(|_| "http://127.0.0.1:7000".to_string());
 
+    let registry_url =
+        env::var("VESSEL_REGISTRY_URL").unwrap_or_else(|_| "http://127.0.0.1:7002".to_string());
+
     let heartbeat_interval_ms = env::var("VESSEL_HEARTBEAT_INTERVAL_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(5_000);
 
-    let worker = Arc::new(WorkerService::new(WorkerConfig::new(node_id)));
+    let worker = Arc::new(WorkerService::with_registry(
+        WorkerConfig::new(node_id),
+        registry_url,
+    ));
 
     let listener = TcpListener::bind(&address).await?;
 
