@@ -73,6 +73,28 @@ impl ControlState {
         self.worker_endpoints.get(id).map(String::as_str)
     }
 
+    pub fn detect_stale_workers(&mut self, observed_at_ms: u64, timeout_ms: u64) -> Vec<Node> {
+        let stale_ids = self
+            .node_last_seen_ms
+            .iter()
+            .filter(|(_, last_seen_ms)| observed_at_ms.saturating_sub(**last_seen_ms) >= timeout_ms)
+            .map(|(node_id, _)| node_id.clone())
+            .collect::<Vec<_>>();
+
+        let mut changed = Vec::new();
+
+        for node_id in stale_ids {
+            if let Some(node) = self.nodes.get_mut(&node_id)
+                && node.status != NodeStatus::Unreachable
+            {
+                node.status = NodeStatus::Unreachable;
+                changed.push(node.clone());
+            }
+        }
+
+        changed
+    }
+
     pub fn register_node(&mut self, node: Node) -> Result<(), ControlError> {
         if self.nodes.contains_key(&node.id) {
             return Err(ControlError::NodeAlreadyExists(node.id.clone()));

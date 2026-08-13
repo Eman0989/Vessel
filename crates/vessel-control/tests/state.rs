@@ -1147,3 +1147,133 @@ fn reconciliation_can_partially_schedule_when_capacity_is_limited() {
 
     assert_eq!(node.allocated_instances, 1,);
 }
+
+#[test]
+fn stale_worker_is_marked_unreachable_at_timeout_boundary() {
+    use vessel_core::WorkerRegistration;
+
+    let mut state = ControlState::new();
+
+    state.register_worker(
+        WorkerRegistration::new(node("node-stale"), "http://node-stale:7001"),
+        1_000,
+    );
+
+    state.register_worker(
+        WorkerRegistration::new(node("node-fresh"), "http://node-fresh:7001"),
+        1_001,
+    );
+
+    state.register_node(node("manual-node")).unwrap();
+
+    let changed = state.detect_stale_workers(6_000, 5_000);
+
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].id, NodeId::new("node-stale"));
+    assert_eq!(changed[0].status, NodeStatus::Unreachable);
+
+    assert_eq!(
+        state.node(&NodeId::new("node-stale")).unwrap().status,
+        NodeStatus::Unreachable,
+    );
+
+    assert_eq!(
+        state.node(&NodeId::new("node-fresh")).unwrap().status,
+        NodeStatus::Ready,
+    );
+
+    assert_eq!(
+        state.node(&NodeId::new("manual-node")).unwrap().status,
+        NodeStatus::Ready,
+    );
+}
+
+#[test]
+fn stale_workers_are_reported_in_node_id_order() {
+    use vessel_core::WorkerRegistration;
+
+    let mut state = ControlState::new();
+
+    for id in ["node-c", "node-a", "node-b"] {
+        state.register_worker(
+            WorkerRegistration::new(node(id), format!("http://{id}:7001")),
+            1_000,
+        );
+    }
+
+    let changed = state.detect_stale_workers(6_000, 5_000);
+
+    let ids = changed
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["node-a", "node-b", "node-c"]);
+}
+
+#[test]
+fn stale_worker_detection_is_idempotent() {
+    use vessel_core::WorkerRegistration;
+
+    let mut state = ControlState::new();
+
+    state.register_worker(
+        WorkerRegistration::new(node("node-01"), "http://node-01:7001"),
+        1_000,
+    );
+
+    let first = state.detect_stale_workers(6_000, 5_000);
+    let second = state.detect_stale_workers(7_000, 5_000);
+
+    assert_eq!(first.len(), 1);
+    assert!(second.is_empty());
+
+    assert_eq!(
+        state.node(&NodeId::new("node-01")).unwrap().status,
+        NodeStatus::Unreachable,
+    );
+}
+
+#[test]
+fn heartbeat_restores_worker_after_failure_detection() {
+    use vessel_core::{ResourceRequest, WorkerHeartbeat, WorkerRegistration};
+
+    let mut state = ControlState::new();
+
+    let registered = node("node-01");
+
+    state.register_worker(
+        WorkerRegistration::new(registered.clone(), "http://node-01:7001"),
+        1_000,
+    );
+
+    let changed = state.detect_stale_workers(6_000, 5_000);
+
+    assert_eq!(changed.len(), 1);
+
+    let heartbeat = WorkerHeartbeat {
+        node_id: NodeId::new("node-01"),
+        status: NodeStatus::Ready,
+        capacity: registered.capacity,
+        allocated: ResourceRequest::default(),
+        allocated_instances: 0,
+    };
+
+    let restored = state.record_heartbeat(heartbeat, 7_000).unwrap();
+
+    assert_eq!(restored.status, NodeStatus::Ready);
+
+    assert_eq!(
+        state.node_last_seen_ms(&NodeId::new("node-01")),
+        Some(7_000),
+    );
+
+    let changed = state.detect_stale_workers(11_999, 5_000);
+
+    assert!(changed.is_empty());
+
+    assert_eq!(
+        state.node(&NodeId::new("node-01")).unwrap().status,
+        NodeStatus::Ready,
+    );
+}

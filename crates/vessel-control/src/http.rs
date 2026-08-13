@@ -17,7 +17,7 @@ use vessel_core::{
 
 use crate::{ControlError, ControlState};
 
-type SharedState = Arc<Mutex<ControlState>>;
+pub type SharedState = Arc<Mutex<ControlState>>;
 type ApiError = (StatusCode, Json<ErrorResponse>);
 
 #[derive(Debug, Serialize)]
@@ -51,6 +51,10 @@ pub struct TransitionInstanceRequest {
 }
 
 pub fn router(state: ControlState) -> Router {
+    shared_router(Arc::new(Mutex::new(state)))
+}
+
+pub fn shared_router(state: SharedState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/cluster/register", post(register_worker))
@@ -69,7 +73,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/instances/{id}/schedule", post(schedule_instance))
         .route("/v1/instances/{id}/invoke", post(invoke_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
-        .with_state(Arc::new(Mutex::new(state)))
+        .with_state(state)
 }
 
 fn lock_state(state: &SharedState) -> Result<MutexGuard<'_, ControlState>, ApiError> {

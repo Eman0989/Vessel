@@ -5,6 +5,6 @@ mod state;
 pub use error::ControlError;
 pub use http::{
     AssignInstanceRequest, ErrorResponse, HealthResponse, NodeStatusRequest,
-    ScaleDeploymentRequest, TransitionInstanceRequest, router,
+    ScaleDeploymentRequest, SharedState, TransitionInstanceRequest, router, shared_router,
 };
 pub use state::ControlState;
