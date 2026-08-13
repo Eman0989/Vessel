@@ -34,13 +34,17 @@ pub struct ErrorResponse {
 }
 
 pub fn router(worker: WorkerService) -> Router {
+    shared_router(Arc::new(worker))
+}
+
+pub fn shared_router(worker: Arc<WorkerService>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/execute", post(execute))
         .route("/v1/drain", post(drain))
         .route("/v1/resume", post(resume))
-        .with_state(Arc::new(worker))
+        .with_state(worker)
 }
 
 fn worker_error_response(error: WorkerError) -> (StatusCode, Json<ErrorResponse>) {
