@@ -108,3 +108,37 @@ fn worker_releases_capacity_after_runtime_failure() {
     assert_eq!(node.allocated.memory_bytes, 0,);
     assert_eq!(node.allocated_instances, 0,);
 }
+
+#[test]
+fn draining_worker_rejects_new_execution_until_resumed() {
+    use vessel_core::{NodeStatus, ResourceRequest};
+
+    let worker = WorkerService::new(WorkerConfig::new("worker-drain"));
+
+    worker.drain().unwrap();
+
+    let node = worker.node_snapshot().unwrap();
+
+    assert_eq!(node.status, NodeStatus::Draining,);
+
+    let request = ExecutionRequest::new(ADD_MODULE, "add", 20, 22)
+        .with_resources(ResourceRequest::new(100, 1_024));
+
+    let error = worker.execute(&request).unwrap_err();
+
+    assert!(matches!(error, WorkerError::Core(_)));
+
+    let node = worker.node_snapshot().unwrap();
+
+    assert_eq!(node.allocated_instances, 0,);
+
+    worker.resume().unwrap();
+
+    let node = worker.node_snapshot().unwrap();
+
+    assert_eq!(node.status, NodeStatus::Ready,);
+
+    let result = worker.execute(&request).unwrap();
+
+    assert_eq!(result.value, 42);
+}

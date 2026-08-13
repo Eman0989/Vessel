@@ -155,3 +155,73 @@ async fn execute_endpoint_rejects_work_above_capacity() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE,);
 }
+
+#[tokio::test]
+async fn drain_endpoint_blocks_execution_until_resume() {
+    let app = test_app();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/drain")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT,);
+
+    let request = ExecutionRequest::new(ADD_MODULE, "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/execute")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE,);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/resume")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT,);
+
+    let request = ExecutionRequest::new(ADD_MODULE, "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/execute")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK,);
+}

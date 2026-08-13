@@ -38,6 +38,8 @@ pub fn router(worker: WorkerService) -> Router {
         .route("/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/execute", post(execute))
+        .route("/v1/drain", post(drain))
+        .route("/v1/resume", post(resume))
         .with_state(Arc::new(worker))
 }
 
@@ -75,6 +77,22 @@ async fn status(
         available_capacity: node.available_capacity(),
         allocated_instances: node.allocated_instances,
     }))
+}
+
+async fn drain(
+    State(worker): State<Arc<WorkerService>>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    worker.drain().map_err(worker_error_response)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn resume(
+    State(worker): State<Arc<WorkerService>>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    worker.resume().map_err(worker_error_response)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn execute(

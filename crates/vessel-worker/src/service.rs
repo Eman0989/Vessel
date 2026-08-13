@@ -52,6 +52,16 @@ impl WorkerService {
         Ok(self.lock_node()?.available_capacity())
     }
 
+    pub fn drain(&self) -> Result<(), WorkerError> {
+        self.lock_node()?.status = NodeStatus::Draining;
+        Ok(())
+    }
+
+    pub fn resume(&self) -> Result<(), WorkerError> {
+        self.lock_node()?.status = NodeStatus::Ready;
+        Ok(())
+    }
+
     pub fn execute(&self, request: &ExecutionRequest) -> Result<ExecutionResult, WorkerError> {
         let node_id = {
             let mut node = self.lock_node()?;
