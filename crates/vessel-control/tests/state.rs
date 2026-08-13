@@ -1277,3 +1277,329 @@ fn heartbeat_restores_worker_after_failure_detection() {
         NodeStatus::Ready,
     );
 }
+
+#[test]
+fn active_instances_on_failed_node_are_marked_lost() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    for id in ["instance-b", "instance-a"] {
+        state
+            .create_instance(instance(id, "deployment-01", "workload-01"))
+            .unwrap();
+
+        state
+            .assign_instance(&InstanceId::new(id), &NodeId::new("node-01"))
+            .unwrap();
+    }
+
+    let lost = state
+        .mark_instances_lost_on_node(&NodeId::new("node-01"))
+        .unwrap();
+
+    assert_eq!(lost.len(), 2);
+
+    assert_eq!(lost[0].id, InstanceId::new("instance-a"));
+    assert_eq!(lost[1].id, InstanceId::new("instance-b"));
+
+    assert!(
+        lost.iter()
+            .all(|instance| instance.status == InstanceStatus::Lost)
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-01"))
+            .unwrap()
+            .allocated_instances,
+        0,
+    );
+}
+
+#[test]
+fn recovery_marks_starting_and_running_instances_lost() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance(
+            "instance-starting",
+            "deployment-01",
+            "workload-01",
+        ))
+        .unwrap();
+
+    state
+        .assign_instance(
+            &InstanceId::new("instance-starting"),
+            &NodeId::new("node-01"),
+        )
+        .unwrap();
+
+    state
+        .transition_instance(
+            &InstanceId::new("instance-starting"),
+            InstanceStatus::Starting,
+        )
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-running", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(
+            &InstanceId::new("instance-running"),
+            &NodeId::new("node-01"),
+        )
+        .unwrap();
+
+    state
+        .transition_instance(
+            &InstanceId::new("instance-running"),
+            InstanceStatus::Starting,
+        )
+        .unwrap();
+
+    state
+        .transition_instance(
+            &InstanceId::new("instance-running"),
+            InstanceStatus::Running,
+        )
+        .unwrap();
+
+    let lost = state
+        .mark_instances_lost_on_node(&NodeId::new("node-01"))
+        .unwrap();
+
+    assert_eq!(lost.len(), 2);
+
+    assert!(
+        lost.iter()
+            .all(|instance| instance.status == InstanceStatus::Lost)
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-01"))
+            .unwrap()
+            .allocated_instances,
+        0,
+    );
+}
+
+#[test]
+fn recovery_only_affects_instances_on_failed_node() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-a")).unwrap();
+    state.register_node(node("node-b")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-a", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-a"), &NodeId::new("node-a"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-b", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-b"), &NodeId::new("node-b"))
+        .unwrap();
+
+    let lost = state
+        .mark_instances_lost_on_node(&NodeId::new("node-a"))
+        .unwrap();
+
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].id, InstanceId::new("instance-a"));
+
+    assert_eq!(
+        state
+            .instance(&InstanceId::new("instance-a"))
+            .unwrap()
+            .status,
+        InstanceStatus::Lost,
+    );
+
+    assert_eq!(
+        state
+            .instance(&InstanceId::new("instance-b"))
+            .unwrap()
+            .status,
+        InstanceStatus::Assigned,
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-a"))
+            .unwrap()
+            .allocated_instances,
+        0,
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-b"))
+            .unwrap()
+            .allocated_instances,
+        1,
+    );
+}
+
+#[test]
+fn lost_instance_marking_is_idempotent_and_rejects_unknown_node() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    let first = state
+        .mark_instances_lost_on_node(&NodeId::new("node-01"))
+        .unwrap();
+
+    let second = state
+        .mark_instances_lost_on_node(&NodeId::new("node-01"))
+        .unwrap();
+
+    assert_eq!(first.len(), 1);
+    assert!(second.is_empty());
+
+    let error = state
+        .mark_instances_lost_on_node(&NodeId::new("missing-node"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::NodeNotFound(NodeId::new("missing-node")),
+    );
+}
+
+#[test]
+fn failed_worker_replica_is_replaced_on_healthy_node() {
+    use vessel_core::WorkerRegistration;
+
+    let mut state = ControlState::new();
+
+    state.register_worker(
+        WorkerRegistration::new(node("node-a"), "http://node-a:7001"),
+        1_000,
+    );
+
+    state.register_worker(
+        WorkerRegistration::new(node("node-b"), "http://node-b:7001"),
+        5_000,
+    );
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    let mut deployment = deployment("deployment-01", "workload-01");
+
+    deployment.desired_replicas = 1;
+
+    state.create_deployment(deployment).unwrap();
+
+    let initial = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(initial.len(), 1);
+
+    assert_eq!(initial[0].id, InstanceId::new("deployment-01-replica-1"),);
+
+    assert_eq!(initial[0].status, InstanceStatus::Assigned);
+
+    assert_eq!(initial[0].node_id, Some(NodeId::new("node-a")),);
+
+    let unreachable = state.detect_stale_workers(6_000, 5_000);
+
+    assert_eq!(unreachable.len(), 1);
+    assert_eq!(unreachable[0].id, NodeId::new("node-a"));
+
+    let lost = state
+        .mark_instances_lost_on_node(&NodeId::new("node-a"))
+        .unwrap();
+
+    assert_eq!(lost.len(), 1);
+
+    assert_eq!(lost[0].id, InstanceId::new("deployment-01-replica-1"),);
+
+    assert_eq!(lost[0].status, InstanceStatus::Lost);
+
+    let replacements = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(replacements.len(), 1);
+
+    assert_eq!(
+        replacements[0].id,
+        InstanceId::new("deployment-01-replica-2"),
+    );
+
+    assert_eq!(replacements[0].status, InstanceStatus::Assigned,);
+
+    assert_eq!(replacements[0].node_id, Some(NodeId::new("node-b")),);
+
+    assert_eq!(
+        state
+            .instance(&InstanceId::new("deployment-01-replica-1",))
+            .unwrap()
+            .status,
+        InstanceStatus::Lost,
+    );
+
+    assert_eq!(
+        state.node(&NodeId::new("node-a")).unwrap().status,
+        NodeStatus::Unreachable,
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-a"))
+            .unwrap()
+            .allocated_instances,
+        0,
+    );
+
+    assert_eq!(
+        state
+            .node(&NodeId::new("node-b"))
+            .unwrap()
+            .allocated_instances,
+        1,
+    );
+}

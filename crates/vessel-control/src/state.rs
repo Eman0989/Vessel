@@ -386,6 +386,39 @@ impl ControlState {
         }
     }
 
+    pub fn mark_instances_lost_on_node(
+        &mut self,
+        node_id: &NodeId,
+    ) -> Result<Vec<Instance>, ControlError> {
+        if !self.nodes.contains_key(node_id) {
+            return Err(ControlError::NodeNotFound(node_id.clone()));
+        }
+
+        let instance_ids = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.node_id.as_ref() == Some(node_id)
+                    && matches!(
+                        instance.status,
+                        InstanceStatus::Assigned
+                            | InstanceStatus::Starting
+                            | InstanceStatus::Running
+                            | InstanceStatus::Stopping
+                    )
+            })
+            .map(|instance| instance.id.clone())
+            .collect::<Vec<_>>();
+
+        let mut lost = Vec::with_capacity(instance_ids.len());
+
+        for instance_id in instance_ids {
+            lost.push(self.transition_instance(&instance_id, InstanceStatus::Lost)?);
+        }
+
+        Ok(lost)
+    }
+
     pub fn schedule_instance(
         &mut self,
         instance_id: &InstanceId,

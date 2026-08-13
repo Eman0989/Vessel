@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env,
     error::Error,
     sync::{Arc, Mutex},
@@ -28,8 +29,53 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
 
         let observed_at_ms = observed_at_ms();
 
-        let changed = match state.lock() {
-            Ok(mut state) => state.detect_stale_workers(observed_at_ms, timeout_ms),
+        let (recoveries, reconciled_instances) = match state.lock() {
+            Ok(mut state) => {
+                let changed = state.detect_stale_workers(observed_at_ms, timeout_ms);
+
+                let mut recoveries = Vec::with_capacity(changed.len());
+                let mut affected_deployments = BTreeSet::new();
+
+                for node in changed {
+                    let lost_instances = match state.mark_instances_lost_on_node(&node.id) {
+                        Ok(instances) => instances,
+
+                        Err(error) => {
+                            eprintln!(
+                                "VESSEL failure detector: failed to recover instances on worker {}: {}",
+                                node.id, error,
+                            );
+
+                            Vec::new()
+                        }
+                    };
+
+                    for instance in &lost_instances {
+                        affected_deployments.insert(instance.deployment_id.clone());
+                    }
+
+                    recoveries.push((node, lost_instances));
+                }
+
+                let mut reconciled_instances = Vec::new();
+
+                for deployment_id in affected_deployments {
+                    match state.reconcile_deployment(&deployment_id) {
+                        Ok(instances) => {
+                            reconciled_instances.extend(instances);
+                        }
+
+                        Err(error) => {
+                            eprintln!(
+                                "VESSEL recovery: failed to reconcile deployment {}: {}",
+                                deployment_id, error,
+                            );
+                        }
+                    }
+                }
+
+                (recoveries, reconciled_instances)
+            }
 
             Err(_) => {
                 eprintln!("VESSEL failure detector: control state lock was poisoned");
@@ -37,10 +83,24 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
             }
         };
 
-        for node in changed {
+        for (node, lost_instances) in recoveries {
             eprintln!(
                 "VESSEL worker {} marked unreachable after heartbeat timeout",
                 node.id,
+            );
+
+            for instance in lost_instances {
+                eprintln!(
+                    "VESSEL instance {} marked lost after worker {} became unreachable",
+                    instance.id, node.id,
+                );
+            }
+        }
+
+        for instance in reconciled_instances {
+            eprintln!(
+                "VESSEL recovery reconciled instance {} with status {:?}",
+                instance.id, instance.status,
             );
         }
     }
