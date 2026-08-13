@@ -358,6 +358,90 @@ impl WasmRuntime {
         }
     }
 
+    pub fn wasi_can_connect_tcp_ipv4(&self, port: u16) -> Result<bool, RuntimeError> {
+        use wasmtime::component::Resource;
+        use wasmtime_wasi::p2::bindings::{
+            sockets::{instance_network, network, tcp_create_socket},
+            sync::{io::poll, sockets::tcp},
+        };
+
+        let mut store = self.new_store()?;
+        let mut sockets = store.data_mut().sockets();
+
+        let network_handle = instance_network::Host::instance_network(&mut sockets)
+            .map_err(RuntimeError::WasiContext)?;
+
+        let network_rep = network_handle.rep();
+
+        let socket = match tcp_create_socket::Host::create_tcp_socket(
+            &mut sockets,
+            network::IpAddressFamily::Ipv4,
+        ) {
+            Ok(socket) => socket,
+
+            Err(error)
+                if matches!(error.downcast_ref(), Some(network::ErrorCode::AccessDenied)) =>
+            {
+                return Ok(false);
+            }
+
+            Err(error) => {
+                return Err(RuntimeError::WasiContext(wasmtime::Error::msg(
+                    error.to_string(),
+                )));
+            }
+        };
+
+        let socket_rep = socket.rep();
+
+        let address = network::IpSocketAddress::Ipv4(network::Ipv4SocketAddress {
+            port,
+            address: (127, 0, 0, 1),
+        });
+
+        let start_result = tcp::HostTcpSocket::start_connect(
+            &mut sockets,
+            Resource::new_borrow(socket_rep),
+            Resource::new_borrow(network_rep),
+            address,
+        );
+
+        match start_result {
+            Ok(()) => {}
+
+            Err(error) if matches!(error.downcast_ref(), Some(tcp::ErrorCode::AccessDenied)) => {
+                return Ok(false);
+            }
+
+            Err(error) => {
+                return Err(RuntimeError::WasiContext(wasmtime::Error::msg(
+                    error.to_string(),
+                )));
+            }
+        }
+
+        let pollable =
+            tcp::HostTcpSocket::subscribe(&mut sockets, Resource::new_borrow(socket_rep))
+                .map_err(RuntimeError::WasiContext)?;
+
+        poll::Host::poll(&mut store.data_mut().table, vec![pollable])
+            .map_err(RuntimeError::WasiContext)?;
+
+        let mut sockets = store.data_mut().sockets();
+
+        match tcp::HostTcpSocket::finish_connect(&mut sockets, Resource::new_borrow(socket_rep)) {
+            Ok(_) => Ok(true),
+
+            Err(error) if matches!(error.downcast_ref(), Some(tcp::ErrorCode::AccessDenied)) => {
+                Ok(false)
+            }
+
+            Err(error) => Err(RuntimeError::WasiContext(wasmtime::Error::msg(
+                error.to_string(),
+            ))),
+        }
+    }
+
     pub fn policy(&self) -> &CapabilityPolicy {
         &self.policy
     }

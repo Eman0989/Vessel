@@ -535,3 +535,42 @@ fn allow_all_policy_enables_wasi_name_lookup() {
 
     assert!(allowed);
 }
+
+#[test]
+fn deny_all_policy_blocks_tcp_connection() {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
+    let port = listener.local_addr().unwrap().port();
+
+    let runtime = WasmRuntime::new();
+
+    let connected = runtime.wasi_can_connect_tcp_ipv4(port).unwrap();
+
+    assert!(!connected);
+}
+
+#[test]
+fn allow_all_policy_allows_tcp_connection() {
+    use std::net::TcpListener;
+
+    use vessel_policy::{CapabilityPolicy, NetworkAccess};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
+    let port = listener.local_addr().unwrap().port();
+
+    let policy = CapabilityPolicy {
+        network: NetworkAccess::AllowAll,
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let connected = runtime.wasi_can_connect_tcp_ipv4(port).unwrap();
+
+    assert!(connected);
+
+    drop(listener);
+}
