@@ -12,11 +12,15 @@ pub enum InstanceStatus {
     Succeeded,
     Failed,
     Lost,
+    Cancelled,
 }
 
 impl InstanceStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Lost)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Lost | Self::Cancelled
+        )
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
@@ -24,19 +28,24 @@ impl InstanceStatus {
             (self, next),
             (Self::Pending, Self::Assigned)
                 | (Self::Pending, Self::Failed)
+                | (Self::Pending, Self::Cancelled)
                 | (Self::Assigned, Self::Starting)
                 | (Self::Assigned, Self::Failed)
                 | (Self::Assigned, Self::Lost)
+                | (Self::Assigned, Self::Cancelled)
                 | (Self::Starting, Self::Running)
                 | (Self::Starting, Self::Failed)
                 | (Self::Starting, Self::Lost)
+                | (Self::Starting, Self::Cancelled)
                 | (Self::Running, Self::Stopping)
                 | (Self::Running, Self::Succeeded)
                 | (Self::Running, Self::Failed)
                 | (Self::Running, Self::Lost)
+                | (Self::Running, Self::Cancelled)
                 | (Self::Stopping, Self::Succeeded)
                 | (Self::Stopping, Self::Failed)
                 | (Self::Stopping, Self::Lost)
+                | (Self::Stopping, Self::Cancelled)
         )
     }
 }

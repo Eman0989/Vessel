@@ -823,3 +823,167 @@ fn reconciling_missing_deployment_is_rejected() {
 
     assert_eq!(state.instance_count(), 0);
 }
+
+#[test]
+fn scale_down_cancels_excess_replicas_deterministically() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 1)
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 1);
+
+    assert_eq!(changed[0].id, InstanceId::new("deployment-01-replica-1",),);
+
+    assert_eq!(changed[0].status, InstanceStatus::Cancelled,);
+
+    assert_eq!(
+        state
+            .instance(&InstanceId::new("deployment-01-replica-2",),)
+            .unwrap()
+            .status,
+        InstanceStatus::Pending,
+    );
+
+    let repeated = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert!(repeated.is_empty());
+}
+
+#[test]
+fn scale_down_prefers_pending_replica_over_assigned_replica() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let replicas = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state.schedule_instance(&replicas[1].id).unwrap();
+
+    state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 1)
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 1);
+
+    assert_eq!(changed[0].id, replicas[0].id,);
+
+    assert_eq!(changed[0].status, InstanceStatus::Cancelled,);
+
+    assert_eq!(
+        state.instance(&replicas[1].id).unwrap().status,
+        InstanceStatus::Assigned,
+    );
+}
+
+#[test]
+fn scale_down_to_zero_releases_reserved_node_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let replicas = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    for replica in &replicas {
+        state.schedule_instance(&replica.id).unwrap();
+    }
+
+    let node_before = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(
+        node_before.allocated,
+        ResourceRequest::new(1_000, 134_217_728,),
+    );
+
+    assert_eq!(node_before.allocated_instances, 2,);
+
+    state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 0)
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 2);
+
+    assert!(
+        changed
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Cancelled })
+    );
+
+    let node_after = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node_after.allocated, ResourceRequest::default(),);
+
+    assert_eq!(node_after.allocated_instances, 0,);
+}
+
+#[test]
+fn terminal_instance_transition_releases_reserved_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .create_instance(instance("instance-01", "deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .assign_instance(&InstanceId::new("instance-01"), &NodeId::new("node-01"))
+        .unwrap();
+
+    state
+        .transition_instance(&InstanceId::new("instance-01"), InstanceStatus::Failed)
+        .unwrap();
+
+    let node = state.node(&NodeId::new("node-01")).unwrap();
+
+    assert_eq!(node.allocated, ResourceRequest::default(),);
+
+    assert_eq!(node.allocated_instances, 0,);
+}

@@ -188,6 +188,20 @@ impl ControlState {
         }
     }
 
+    fn scale_down_priority(status: InstanceStatus) -> u8 {
+        match status {
+            InstanceStatus::Pending => 0,
+            InstanceStatus::Assigned => 1,
+            InstanceStatus::Starting => 2,
+            InstanceStatus::Running => 3,
+            InstanceStatus::Stopping => 4,
+            InstanceStatus::Succeeded
+            | InstanceStatus::Failed
+            | InstanceStatus::Lost
+            | InstanceStatus::Cancelled => 5,
+        }
+    }
+
     pub fn reconcile_deployment(
         &mut self,
         id: &DeploymentId,
@@ -198,49 +212,79 @@ impl ControlState {
             .cloned()
             .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
 
-        let workload = self
-            .workloads
-            .get(&deployment.workload_id)
-            .cloned()
-            .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
-
-        let active_replicas = self
+        let mut active = self
             .instances
             .values()
             .filter(|instance| {
                 instance.deployment_id == deployment.id && !instance.status.is_terminal()
             })
-            .count() as u32;
+            .map(|instance| {
+                (
+                    Self::scale_down_priority(instance.status),
+                    instance.id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
 
-        let missing_replicas = deployment.desired_replicas.saturating_sub(active_replicas);
+        let active_replicas = active.len() as u32;
 
-        if missing_replicas == 0 {
-            return Ok(Vec::new());
+        if active_replicas < deployment.desired_replicas {
+            let workload = self
+                .workloads
+                .get(&deployment.workload_id)
+                .cloned()
+                .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
+
+            let missing_replicas = deployment.desired_replicas - active_replicas;
+
+            let mut changed = Vec::new();
+
+            for _ in 0..missing_replicas {
+                let instance = Instance {
+                    id: self.next_replica_id(&deployment.id),
+                    deployment_id: deployment.id.clone(),
+                    workload_id: deployment.workload_id.clone(),
+                    node_id: None,
+                    status: InstanceStatus::Pending,
+                    resources: workload.spec.resources,
+                    restart_count: 0,
+                };
+
+                self.instances.insert(instance.id.clone(), instance.clone());
+
+                changed.push(instance);
+            }
+
+            if let Some(deployment) = self.deployments.get_mut(id) {
+                deployment.status = DeploymentStatus::Progressing;
+            }
+
+            return Ok(changed);
         }
 
-        let mut created = Vec::new();
+        if active_replicas > deployment.desired_replicas {
+            let excess = active_replicas - deployment.desired_replicas;
 
-        for _ in 0..missing_replicas {
-            let instance = Instance {
-                id: self.next_replica_id(&deployment.id),
-                deployment_id: deployment.id.clone(),
-                workload_id: deployment.workload_id.clone(),
-                node_id: None,
-                status: InstanceStatus::Pending,
-                resources: workload.spec.resources,
-                restart_count: 0,
-            };
+            active.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
+                left_priority
+                    .cmp(right_priority)
+                    .then_with(|| left_id.cmp(right_id))
+            });
 
-            self.instances.insert(instance.id.clone(), instance.clone());
+            let mut changed = Vec::new();
 
-            created.push(instance);
+            for (_, instance_id) in active.into_iter().take(excess as usize) {
+                changed.push(self.transition_instance(&instance_id, InstanceStatus::Cancelled)?);
+            }
+
+            if let Some(deployment) = self.deployments.get_mut(id) {
+                deployment.status = DeploymentStatus::Progressing;
+            }
+
+            return Ok(changed);
         }
 
-        if let Some(deployment) = self.deployments.get_mut(id) {
-            deployment.status = DeploymentStatus::Progressing;
-        }
-
-        Ok(created)
+        Ok(Vec::new())
     }
 
     pub fn scale_deployment(
@@ -325,14 +369,44 @@ impl ControlState {
             ));
         }
 
-        let instance = self
+        let previous = self
             .instances
-            .get_mut(instance_id)
+            .get(instance_id)
+            .cloned()
             .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
 
-        instance.transition_to(status)?;
+        let release_node_id = if !previous.status.is_terminal() && status.is_terminal() {
+            previous.node_id.clone()
+        } else {
+            None
+        };
 
-        Ok(instance.clone())
+        if let Some(node_id) = &release_node_id
+            && !self.nodes.contains_key(node_id)
+        {
+            return Err(ControlError::NodeNotFound(node_id.clone()));
+        }
+
+        let updated = {
+            let instance = self
+                .instances
+                .get_mut(instance_id)
+                .ok_or_else(|| ControlError::InstanceNotFound(instance_id.clone()))?;
+
+            instance.transition_to(status)?;
+            instance.clone()
+        };
+
+        if let Some(node_id) = release_node_id {
+            let node = self
+                .nodes
+                .get_mut(&node_id)
+                .ok_or_else(|| ControlError::NodeNotFound(node_id.clone()))?;
+
+            node.release(&previous.resources);
+        }
+
+        Ok(updated)
     }
 
     pub fn node_count(&self) -> usize {
