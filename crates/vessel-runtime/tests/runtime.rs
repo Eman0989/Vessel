@@ -510,3 +510,28 @@ fn read_write_preopen_allows_file_creation() {
 
     assert!(host_directory.path().join("allowed.txt").exists());
 }
+
+#[test]
+fn deny_all_policy_blocks_wasi_name_lookup() {
+    let runtime = WasmRuntime::new();
+
+    let allowed = runtime.wasi_can_resolve_name("127.0.0.1").unwrap();
+
+    assert!(!allowed);
+}
+
+#[test]
+fn allow_all_policy_enables_wasi_name_lookup() {
+    use vessel_policy::{CapabilityPolicy, NetworkAccess};
+
+    let policy = CapabilityPolicy {
+        network: NetworkAccess::AllowAll,
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let allowed = runtime.wasi_can_resolve_name("127.0.0.1").unwrap();
+
+    assert!(allowed);
+}

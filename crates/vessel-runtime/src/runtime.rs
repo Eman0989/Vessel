@@ -7,6 +7,7 @@ use vessel_policy::{CapabilityPolicy, DirectoryAccess, NetworkAccess};
 use wasmtime::component::{Component, Linker as ComponentLinker};
 use wasmtime::{Config, Engine, Instance, Module, Store, Trap};
 use wasmtime_wasi::filesystem::WasiFilesystemView;
+use wasmtime_wasi::sockets::WasiSocketsView;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
 #[derive(Clone)]
@@ -315,6 +316,37 @@ impl WasmRuntime {
                     wasmtime_wasi::p2::bindings::filesystem::types::ErrorCode::ReadOnly
                         | wasmtime_wasi::p2::bindings::filesystem::types::ErrorCode::NotPermitted
                 )
+                ) =>
+            {
+                Ok(false)
+            }
+
+            Err(error) => Err(RuntimeError::WasiContext(wasmtime::Error::msg(
+                error.to_string(),
+            ))),
+        }
+    }
+
+    pub fn wasi_can_resolve_name(&self, name: &str) -> Result<bool, RuntimeError> {
+        use wasmtime_wasi::p2::bindings::sockets::{instance_network, ip_name_lookup, network};
+
+        let mut store = self.new_store()?;
+        let mut sockets = store.data_mut().sockets();
+
+        let network_handle = instance_network::Host::instance_network(&mut sockets)
+            .map_err(RuntimeError::WasiContext)?;
+
+        let result =
+            ip_name_lookup::Host::resolve_addresses(&mut sockets, network_handle, name.to_string());
+
+        match result {
+            Ok(_) => Ok(true),
+
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(network::ErrorCode::PermanentResolverFailure)
+                        | Some(network::ErrorCode::AccessDenied)
                 ) =>
             {
                 Ok(false)
