@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use vessel_core::NodeId;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionRequest {
     pub module_bytes: Vec<u8>,
     pub export: String,
@@ -24,7 +25,7 @@ impl ExecutionRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionResult {
     pub node_id: NodeId,
     pub value: i32,
