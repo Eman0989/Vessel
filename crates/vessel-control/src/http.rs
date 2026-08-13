@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,8 +11,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use vessel_core::{
-    Deployment, DeploymentId, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
-    WorkerHeartbeat, WorkerRegistration, Workload,
+    Deployment, DeploymentId, ExecutionRequest, ExecutionResult, Instance, InstanceId,
+    InstanceStatus, Node, NodeId, NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload,
 };
 
 use crate::{ControlError, ControlState};
@@ -25,7 +25,7 @@ pub struct HealthResponse {
     pub status: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -67,6 +67,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/instances", get(list_instances).post(create_instance))
         .route("/v1/instances/{id}/assign", post(assign_instance))
         .route("/v1/instances/{id}/schedule", post(schedule_instance))
+        .route("/v1/instances/{id}/invoke", post(invoke_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
         .with_state(Arc::new(Mutex::new(state)))
 }
@@ -80,6 +81,12 @@ fn lock_state(state: &SharedState) -> Result<MutexGuard<'_, ControlState>, ApiEr
             }),
         )
     })
+}
+
+fn gateway_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 fn control_error_response(error: ControlError) -> ApiError {
@@ -274,6 +281,116 @@ async fn schedule_instance(
         .map_err(control_error_response)?;
 
     Ok(Json(instance))
+}
+
+async fn invoke_instance(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(mut request): Json<ExecutionRequest>,
+) -> Result<Json<ExecutionResult>, ApiError> {
+    let instance_id = InstanceId::new(id);
+
+    let (node_id, endpoint, resources) = {
+        let state = lock_state(&state)?;
+
+        let instance = state.instance(&instance_id).ok_or_else(|| {
+            control_error_response(ControlError::InstanceNotFound(instance_id.clone()))
+        })?;
+
+        if !matches!(
+            instance.status,
+            InstanceStatus::Assigned | InstanceStatus::Starting | InstanceStatus::Running
+        ) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!(
+                        "instance {} is not invokable while {:?}",
+                        instance.id, instance.status,
+                    ),
+                }),
+            ));
+        }
+
+        let node_id = instance.node_id.clone().ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!("instance {} is not assigned to a worker", instance.id,),
+                }),
+            )
+        })?;
+
+        let endpoint = state
+            .worker_endpoint(&node_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: format!("worker endpoint for node {node_id} is unavailable",),
+                    }),
+                )
+            })?
+            .to_string();
+
+        (node_id, endpoint, instance.resources)
+    };
+
+    // The placement owns the resource profile. Do not allow callers to
+    // execute the instance with a different resource request.
+    request.resources = resources;
+
+    let worker_url = format!("{}/v1/execute", endpoint.trim_end_matches('/'));
+
+    let response = gateway_client()
+        .post(worker_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("failed to reach worker {node_id}: {error}",),
+                }),
+            )
+        })?;
+
+    let worker_status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    if !worker_status.is_success() {
+        let error = response
+            .json::<ErrorResponse>()
+            .await
+            .map(|body| body.error)
+            .unwrap_or_else(|_| format!("worker {node_id} returned HTTP {worker_status}",));
+
+        return Err((worker_status, Json(ErrorResponse { error })));
+    }
+
+    let result = response.json::<ExecutionResult>().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("worker {node_id} returned an invalid execution response: {error}",),
+            }),
+        )
+    })?;
+
+    if result.node_id != node_id {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!(
+                    "worker response node {} did not match assigned node {}",
+                    result.node_id, node_id,
+                ),
+            }),
+        ));
+    }
+
+    Ok(Json(result))
 }
 
 async fn transition_instance(

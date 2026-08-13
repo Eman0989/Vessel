@@ -1841,6 +1841,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "http-body-util",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1848,6 +1849,7 @@ dependencies = [
  "tower",
  "vessel-core",
  "vessel-scheduler",
+ "vessel-worker",
 ]
 
 [[package]]

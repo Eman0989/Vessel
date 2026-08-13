@@ -1,6 +1,7 @@
 mod cluster;
 mod deployment;
 mod error;
+mod execution;
 mod ids;
 mod instance;
 mod node;
@@ -10,6 +11,7 @@ mod workload;
 pub use cluster::{WorkerHeartbeat, WorkerRegistration};
 pub use deployment::{Deployment, DeploymentStatus};
 pub use error::CoreError;
+pub use execution::{ExecutionRequest, ExecutionResult};
 pub use ids::{DeploymentId, InstanceId, NodeId, WorkloadId};
 pub use instance::{Instance, InstanceStatus};
 pub use node::{Node, NodeStatus};

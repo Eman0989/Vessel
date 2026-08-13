@@ -6,13 +6,15 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 use vessel_control::{ControlState, router};
 use vessel_core::{
-    ArtifactRef, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus,
-    Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload, WorkloadId,
-    WorkloadSpec, WorkloadStatus,
+    ArtifactRef, Deployment, DeploymentId, DeploymentStatus, ExecutionRequest, Instance,
+    InstanceId, InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest,
+    Workload, WorkloadId, WorkloadSpec, WorkloadStatus,
 };
+use vessel_worker::{WorkerConfig, WorkerService, router as worker_router};
 
 fn test_app() -> axum::Router {
     router(ControlState::new())
@@ -1015,4 +1017,129 @@ async fn deployment_reconciliation_schedules_replicas_when_node_is_available() {
             .iter()
             .all(|instance| instance["node_id"] == "node-01")
     );
+}
+
+#[tokio::test]
+async fn assigned_instance_invocation_is_forwarded_to_worker() {
+    const ADD_MODULE: &[u8] = br#"
+(module
+  (func (export "add")
+    (param i32 i32)
+    (result i32)
+    local.get 0
+    local.get 1
+    i32.add
+  )
+)
+"#;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker_endpoint = format!("http://{address}");
+
+    let worker =
+        WorkerService::new(WorkerConfig::new("gateway-node-01").with_endpoint(worker_endpoint));
+
+    let registration = worker.registration().unwrap();
+
+    let worker_server = tokio::spawn(async move {
+        axum::serve(listener, worker_router(worker)).await.unwrap();
+    });
+
+    let app = test_app();
+
+    let body = serde_json::to_vec(&registration).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/cluster/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut deployment = deployment("deployment-01", "workload-01");
+
+    deployment.desired_replicas = 1;
+
+    let body = serde_json::to_vec(&deployment).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let reconciled = body_json(response).await;
+
+    assert_eq!(reconciled.as_array().unwrap().len(), 1);
+    assert_eq!(reconciled[0]["status"], "assigned");
+    assert_eq!(reconciled[0]["node_id"], "gateway-node-01");
+
+    let request =
+        ExecutionRequest::new(ADD_MODULE, "add", 20, 22).with_resources(ResourceRequest::new(1, 1));
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/deployment-01-replica-1/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let result = body_json(response).await;
+
+    assert_eq!(result["node_id"], "gateway-node-01");
+    assert_eq!(result["value"], 42);
+
+    worker_server.abort();
 }
