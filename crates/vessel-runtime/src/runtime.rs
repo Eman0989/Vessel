@@ -6,6 +6,7 @@ use crate::{
 use vessel_policy::{CapabilityPolicy, DirectoryAccess, NetworkAccess};
 use wasmtime::component::{Component, Linker as ComponentLinker};
 use wasmtime::{Config, Engine, Instance, Module, Store, Trap};
+use wasmtime_wasi::filesystem::WasiFilesystemView;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
 #[derive(Clone)]
@@ -264,6 +265,22 @@ impl WasmRuntime {
 
         wasmtime_wasi::p2::bindings::cli::environment::Host::get_environment(&mut cli)
             .map_err(RuntimeError::WasiContext)
+    }
+
+    pub fn wasi_preopened_directories(&self) -> Result<Vec<String>, RuntimeError> {
+        let mut store = self.new_store()?;
+
+        let mut filesystem = store.data_mut().filesystem();
+
+        let directories = wasmtime_wasi::p2::bindings::filesystem::preopens::Host::get_directories(
+            &mut filesystem,
+        )
+        .map_err(RuntimeError::WasiContext)?;
+
+        Ok(directories
+            .into_iter()
+            .map(|(_, guest_path)| guest_path)
+            .collect())
     }
 
     pub fn policy(&self) -> &CapabilityPolicy {

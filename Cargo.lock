@@ -1572,6 +1572,7 @@ version = "0.1.0"
 name = "vessel-runtime"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "thiserror 2.0.20",
  "vessel-policy",
  "wasmtime",

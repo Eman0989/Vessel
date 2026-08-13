@@ -425,3 +425,36 @@ fn invalid_preopen_fails_before_guest_execution() {
 
     assert!(matches!(result, Err(RuntimeError::WasiContext(_))));
 }
+
+#[test]
+fn default_policy_has_no_preopened_directories() {
+    let runtime = WasmRuntime::new();
+
+    let directories = runtime.wasi_preopened_directories().unwrap();
+
+    assert!(directories.is_empty());
+}
+
+#[test]
+fn explicit_directory_is_preopened_for_wasi() {
+    use std::path::PathBuf;
+
+    use vessel_policy::{CapabilityPolicy, DirectoryAccess, DirectoryCapability};
+
+    let host_directory = tempfile::tempdir().unwrap();
+
+    let policy = CapabilityPolicy {
+        directories: vec![DirectoryCapability {
+            host_path: PathBuf::from(host_directory.path()),
+            guest_path: "/data".to_string(),
+            access: DirectoryAccess::ReadOnly,
+        }],
+        ..CapabilityPolicy::deny_all()
+    };
+
+    let runtime = WasmRuntime::with_limits_and_policy(RuntimeLimits::default(), policy).unwrap();
+
+    let directories = runtime.wasi_preopened_directories().unwrap();
+
+    assert_eq!(directories, vec!["/data".to_string()]);
+}
