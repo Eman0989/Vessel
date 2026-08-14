@@ -1706,3 +1706,341 @@ fn failed_worker_replica_is_replaced_on_healthy_node() {
         1,
     );
 }
+
+#[test]
+fn rolling_reconciliation_replaces_one_old_replica_per_pass() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-rollout", "workload-v1"))
+        .unwrap();
+
+    let initial = state
+        .reconcile_deployment(&DeploymentId::new("deployment-rollout"))
+        .unwrap();
+
+    assert_eq!(initial.len(), 2);
+    assert!(
+        initial
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Assigned })
+    );
+
+    state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-rollout"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap();
+
+    let first = state
+        .reconcile_deployment(&DeploymentId::new("deployment-rollout"))
+        .unwrap();
+
+    assert_eq!(first.len(), 2);
+
+    let active_after_first = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-rollout")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active_after_first.len(), 2);
+
+    assert_eq!(
+        active_after_first
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+            .count(),
+        1,
+    );
+
+    assert_eq!(
+        active_after_first
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v2") })
+            .count(),
+        1,
+    );
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-rollout",),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Progressing,
+    );
+
+    let second = state
+        .reconcile_deployment(&DeploymentId::new("deployment-rollout"))
+        .unwrap();
+
+    assert_eq!(second.len(), 2);
+
+    let active_after_second = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-rollout")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active_after_second.len(), 2);
+
+    assert!(active_after_second.iter().all(|instance| {
+        instance.workload_id == WorkloadId::new("workload-v2")
+            && instance.status == InstanceStatus::Assigned
+    }));
+
+    let deployment = state
+        .deployment(&DeploymentId::new("deployment-rollout"))
+        .unwrap();
+
+    assert_eq!(deployment.generation, 2);
+    assert_eq!(deployment.status, DeploymentStatus::Healthy,);
+
+    let third = state
+        .reconcile_deployment(&DeploymentId::new("deployment-rollout"))
+        .unwrap();
+
+    assert!(third.is_empty());
+}
+
+#[test]
+fn rolling_reconciliation_does_not_drain_old_replicas_while_target_is_pending() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut target = workload("workload-v2");
+    target.spec.resources = ResourceRequest::new(5_000, 67_108_864);
+
+    state.register_workload(target).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-stalled", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-stalled"))
+        .unwrap();
+
+    state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-stalled"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap();
+
+    let first = state
+        .reconcile_deployment(&DeploymentId::new("deployment-stalled"))
+        .unwrap();
+
+    assert_eq!(first.len(), 2);
+
+    assert!(
+        first
+            .iter()
+            .any(|instance| { instance.status == InstanceStatus::Cancelled })
+    );
+
+    assert!(first.iter().any(|instance| {
+        instance.workload_id == WorkloadId::new("workload-v2")
+            && instance.status == InstanceStatus::Pending
+    }));
+
+    let second = state
+        .reconcile_deployment(&DeploymentId::new("deployment-stalled"))
+        .unwrap();
+
+    assert!(second.is_empty());
+
+    let instances = state.list_instances();
+
+    let active_old = instances
+        .iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-stalled")
+                && instance.workload_id == WorkloadId::new("workload-v1")
+                && !instance.status.is_terminal()
+        })
+        .count();
+
+    let pending_target = instances
+        .iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-stalled")
+                && instance.workload_id == WorkloadId::new("workload-v2")
+                && instance.status == InstanceStatus::Pending
+        })
+        .count();
+
+    let cancelled_old = instances
+        .iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-stalled")
+                && instance.workload_id == WorkloadId::new("workload-v1")
+                && instance.status == InstanceStatus::Cancelled
+        })
+        .count();
+
+    assert_eq!(active_old, 1);
+    assert_eq!(pending_target, 1);
+    assert_eq!(cancelled_old, 1);
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-stalled",),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Progressing,
+    );
+}
+
+#[test]
+fn rolling_reconciliation_resumes_after_pending_target_becomes_schedulable() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-small")).unwrap();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut target = workload("workload-v2");
+    target.spec.resources = ResourceRequest::new(5_000, 67_108_864);
+
+    state.register_workload(target).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-resume", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-resume"))
+        .unwrap();
+
+    state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-resume"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-resume"))
+        .unwrap();
+
+    let mut large = node("node-large");
+    large.capacity = ResourceCapacity::new(12_000, 536_870_912, 4);
+
+    state.register_node(large).unwrap();
+
+    let retry = state
+        .reconcile_deployment(&DeploymentId::new("deployment-resume"))
+        .unwrap();
+
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].workload_id, WorkloadId::new("workload-v2"),);
+    assert_eq!(retry[0].status, InstanceStatus::Assigned,);
+
+    let completion = state
+        .reconcile_deployment(&DeploymentId::new("deployment-resume"))
+        .unwrap();
+
+    assert_eq!(completion.len(), 2);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-resume")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert!(active.iter().all(|instance| {
+        instance.workload_id == WorkloadId::new("workload-v2")
+            && instance.status == InstanceStatus::Assigned
+    }));
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-resume",),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+}
+
+#[test]
+fn scale_down_during_rollout_prefers_previous_revision() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-scale-rollout", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-scale-rollout"))
+        .unwrap();
+
+    state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-scale-rollout"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-scale-rollout"))
+        .unwrap();
+
+    state
+        .scale_deployment(&DeploymentId::new("deployment-scale-rollout"), 1)
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-scale-rollout"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].workload_id, WorkloadId::new("workload-v1"),);
+    assert_eq!(changed[0].status, InstanceStatus::Cancelled,);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-scale-rollout")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].workload_id, WorkloadId::new("workload-v2"),);
+
+    let deployment = state
+        .deployment(&DeploymentId::new("deployment-scale-rollout"))
+        .unwrap();
+
+    assert_eq!(deployment.desired_replicas, 1);
+    assert_eq!(deployment.generation, 3);
+    assert_eq!(deployment.status, DeploymentStatus::Healthy,);
+}

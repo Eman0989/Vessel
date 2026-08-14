@@ -284,6 +284,38 @@ impl ControlState {
         }
     }
 
+    fn create_pending_replica(
+        &mut self,
+        deployment: &Deployment,
+    ) -> Result<Instance, ControlError> {
+        let workload = self
+            .workloads
+            .get(&deployment.workload_id)
+            .cloned()
+            .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
+
+        let instance = Instance {
+            id: self.next_replica_id(&deployment.id),
+            deployment_id: deployment.id.clone(),
+            workload_id: deployment.workload_id.clone(),
+            node_id: None,
+            status: InstanceStatus::Pending,
+            resources: workload.spec.resources,
+            restart_count: 0,
+        };
+
+        self.instances.insert(instance.id.clone(), instance.clone());
+
+        Ok(instance)
+    }
+
+    fn rollout_replica_available(status: InstanceStatus) -> bool {
+        matches!(
+            status,
+            InstanceStatus::Assigned | InstanceStatus::Starting | InstanceStatus::Running
+        )
+    }
+
     pub fn reconcile_deployment(
         &mut self,
         id: &DeploymentId,
@@ -303,7 +335,14 @@ impl ControlState {
                 instance.deployment_id == deployment.id && !instance.status.is_terminal()
             })
             .map(|instance| {
+                let revision_priority = if instance.workload_id == deployment.workload_id {
+                    1_u8
+                } else {
+                    0_u8
+                };
+
                 (
+                    revision_priority,
                     Self::scale_down_priority(instance.status),
                     instance.id.clone(),
                 )
@@ -313,42 +352,82 @@ impl ControlState {
         let active_replicas = active.len() as u32;
 
         if active_replicas < deployment.desired_replicas {
-            let workload = self
-                .workloads
-                .get(&deployment.workload_id)
-                .cloned()
-                .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
-
             let missing_replicas = deployment.desired_replicas - active_replicas;
 
             for _ in 0..missing_replicas {
-                let instance = Instance {
-                    id: self.next_replica_id(&deployment.id),
-                    deployment_id: deployment.id.clone(),
-                    workload_id: deployment.workload_id.clone(),
-                    node_id: None,
-                    status: InstanceStatus::Pending,
-                    resources: workload.spec.resources,
-                    restart_count: 0,
-                };
-
-                self.instances.insert(instance.id.clone(), instance.clone());
+                let instance = self.create_pending_replica(&deployment)?;
 
                 changed.insert(instance.id.clone(), instance);
             }
         } else if active_replicas > deployment.desired_replicas {
             let excess = active_replicas - deployment.desired_replicas;
 
-            active.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
-                left_priority
-                    .cmp(right_priority)
-                    .then_with(|| left_id.cmp(right_id))
-            });
+            // During a rollout, scale-down removes replicas
+            // from previous workload revisions before removing
+            // target-revision replicas.
+            active.sort_by(
+                |(left_revision, left_priority, left_id),
+                 (right_revision, right_priority, right_id)| {
+                    left_revision
+                        .cmp(right_revision)
+                        .then_with(|| left_priority.cmp(right_priority))
+                        .then_with(|| left_id.cmp(right_id))
+                },
+            );
 
-            for (_, instance_id) in active.into_iter().take(excess as usize) {
+            for (_, _, instance_id) in active.into_iter().take(excess as usize) {
                 let instance = self.transition_instance(&instance_id, InstanceStatus::Cancelled)?;
 
                 changed.insert(instance.id.clone(), instance);
+            }
+        } else {
+            let mut old_replicas = self
+                .instances
+                .values()
+                .filter(|instance| {
+                    instance.deployment_id == deployment.id
+                        && !instance.status.is_terminal()
+                        && instance.workload_id != deployment.workload_id
+                })
+                .map(|instance| {
+                    (
+                        Self::scale_down_priority(instance.status),
+                        instance.id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            // A target replica that has not yet become
+            // available represents the single allowed
+            // in-flight replacement. Do not cancel another
+            // old replica until it becomes available.
+            let replacement_in_flight = self.instances.values().any(|instance| {
+                instance.deployment_id == deployment.id
+                    && !instance.status.is_terminal()
+                    && instance.workload_id == deployment.workload_id
+                    && !Self::rollout_replica_available(instance.status)
+            });
+
+            if !old_replicas.is_empty() && !replacement_in_flight {
+                old_replicas.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
+                    left_priority
+                        .cmp(right_priority)
+                        .then_with(|| left_id.cmp(right_id))
+                });
+
+                let (_, old_instance_id) = old_replicas
+                    .into_iter()
+                    .next()
+                    .expect("old replica list is not empty");
+
+                let old_instance =
+                    self.transition_instance(&old_instance_id, InstanceStatus::Cancelled)?;
+
+                changed.insert(old_instance.id.clone(), old_instance);
+
+                let replacement = self.create_pending_replica(&deployment)?;
+
+                changed.insert(replacement.id.clone(), replacement);
             }
         }
 
@@ -369,18 +448,36 @@ impl ControlState {
                 }
 
                 Err(ControlError::Scheduler(SchedulerError::NoEligibleNodes { .. })) => {
-                    // Lack of cluster capacity is not a reconciliation
-                    // failure. Keep this replica pending for a later pass.
+                    // Lack of cluster capacity is not a
+                    // reconciliation failure. The pending
+                    // target replica also blocks another
+                    // rollout replacement on the next pass.
                 }
 
                 Err(error) => return Err(error),
             }
         }
 
-        if !changed.is_empty()
-            && let Some(deployment) = self.deployments.get_mut(id)
-        {
-            deployment.status = DeploymentStatus::Progressing;
+        let active_instances = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id && !instance.status.is_terminal()
+            })
+            .collect::<Vec<_>>();
+
+        let deployment_converged = active_instances.len() as u32 == deployment.desired_replicas
+            && active_instances.iter().all(|instance| {
+                instance.workload_id == deployment.workload_id
+                    && Self::rollout_replica_available(instance.status)
+            });
+
+        if let Some(stored) = self.deployments.get_mut(id) {
+            if deployment_converged {
+                stored.status = DeploymentStatus::Healthy;
+            } else if !changed.is_empty() || stored.status == DeploymentStatus::Progressing {
+                stored.status = DeploymentStatus::Progressing;
+            }
         }
 
         Ok(changed.into_values().collect())
