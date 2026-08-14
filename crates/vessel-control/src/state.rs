@@ -284,20 +284,21 @@ impl ControlState {
         }
     }
 
-    fn create_pending_replica(
+    fn create_pending_replica_for_workload(
         &mut self,
         deployment: &Deployment,
+        workload_id: &WorkloadId,
     ) -> Result<Instance, ControlError> {
         let workload = self
             .workloads
-            .get(&deployment.workload_id)
+            .get(workload_id)
             .cloned()
-            .ok_or_else(|| ControlError::WorkloadNotFound(deployment.workload_id.clone()))?;
+            .ok_or_else(|| ControlError::WorkloadNotFound(workload_id.clone()))?;
 
         let instance = Instance {
             id: self.next_replica_id(&deployment.id),
             deployment_id: deployment.id.clone(),
-            workload_id: deployment.workload_id.clone(),
+            workload_id: workload_id.clone(),
             node_id: None,
             status: InstanceStatus::Pending,
             resources: workload.spec.resources,
@@ -309,11 +310,249 @@ impl ControlState {
         Ok(instance)
     }
 
+    fn create_pending_replica(
+        &mut self,
+        deployment: &Deployment,
+    ) -> Result<Instance, ControlError> {
+        self.create_pending_replica_for_workload(deployment, &deployment.workload_id)
+    }
+
     fn rollout_replica_available(status: InstanceStatus) -> bool {
         matches!(
             status,
             InstanceStatus::Assigned | InstanceStatus::Starting | InstanceStatus::Running
         )
+    }
+
+    fn reconcile_canary_deployment(
+        &mut self,
+        deployment: &Deployment,
+        canary: &CanaryPlan,
+    ) -> Result<Vec<Instance>, ControlError> {
+        let stable_target = canary.stable_replicas(deployment.desired_replicas)?;
+        let candidate_target = canary.candidate_replicas;
+
+        let mut changed = BTreeMap::<InstanceId, Instance>::new();
+
+        let snapshot = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id && !instance.status.is_terminal()
+            })
+            .map(|instance| {
+                (
+                    instance.id.clone(),
+                    instance.workload_id.clone(),
+                    instance.status,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let active_total = snapshot.len() as u32;
+
+        let stable_count = snapshot
+            .iter()
+            .filter(|(_, workload_id, _)| workload_id == &canary.stable_workload_id)
+            .count() as u32;
+
+        let candidate_count = snapshot
+            .iter()
+            .filter(|(_, workload_id, _)| workload_id == &canary.candidate_workload_id)
+            .count() as u32;
+
+        let stable_deficit = stable_target.saturating_sub(stable_count);
+        let candidate_deficit = candidate_target.saturating_sub(candidate_count);
+
+        let stable_excess = stable_count.saturating_sub(stable_target);
+        let candidate_excess = candidate_count.saturating_sub(candidate_target);
+
+        let mut unexpected = snapshot
+            .iter()
+            .filter(|(_, workload_id, _)| {
+                workload_id != &canary.stable_workload_id
+                    && workload_id != &canary.candidate_workload_id
+            })
+            .map(|(id, _, status)| (Self::scale_down_priority(*status), id.clone()))
+            .collect::<Vec<_>>();
+
+        let replacement_workload_id = if stable_deficit > 0 {
+            Some(canary.stable_workload_id.clone())
+        } else if candidate_deficit > 0 {
+            Some(canary.candidate_workload_id.clone())
+        } else {
+            None
+        };
+
+        let replacement_in_flight = replacement_workload_id.as_ref().is_some_and(|target| {
+            snapshot.iter().any(|(_, workload_id, status)| {
+                workload_id == target && !Self::rollout_replica_available(*status)
+            })
+        });
+
+        if !unexpected.is_empty() {
+            unexpected.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
+                left_priority
+                    .cmp(right_priority)
+                    .then_with(|| left_id.cmp(right_id))
+            });
+
+            let (_, victim_id) = unexpected
+                .into_iter()
+                .next()
+                .expect("unexpected replica list is not empty");
+
+            let removed = self.transition_instance(&victim_id, InstanceStatus::Cancelled)?;
+
+            changed.insert(removed.id.clone(), removed);
+
+            if active_total <= deployment.desired_replicas
+                && !replacement_in_flight
+                && let Some(workload_id) = replacement_workload_id.as_ref()
+            {
+                let replacement =
+                    self.create_pending_replica_for_workload(deployment, workload_id)?;
+
+                changed.insert(replacement.id.clone(), replacement);
+            }
+        } else {
+            let mut excess_replicas = Vec::new();
+
+            if stable_excess > 0 {
+                excess_replicas.extend(
+                    snapshot
+                        .iter()
+                        .filter(|(_, workload_id, _)| workload_id == &canary.stable_workload_id)
+                        .map(|(id, _, status)| (Self::scale_down_priority(*status), id.clone())),
+                );
+            }
+
+            if candidate_excess > 0 {
+                excess_replicas.extend(
+                    snapshot
+                        .iter()
+                        .filter(|(_, workload_id, _)| workload_id == &canary.candidate_workload_id)
+                        .map(|(id, _, status)| (Self::scale_down_priority(*status), id.clone())),
+                );
+            }
+
+            excess_replicas.sort_by(|(left_priority, left_id), (right_priority, right_id)| {
+                left_priority
+                    .cmp(right_priority)
+                    .then_with(|| left_id.cmp(right_id))
+            });
+
+            if active_total > deployment.desired_replicas {
+                if let Some((_, victim_id)) = excess_replicas.into_iter().next() {
+                    let removed =
+                        self.transition_instance(&victim_id, InstanceStatus::Cancelled)?;
+
+                    changed.insert(removed.id.clone(), removed);
+                }
+            } else if !excess_replicas.is_empty() {
+                if !replacement_in_flight {
+                    let (_, victim_id) = excess_replicas
+                        .into_iter()
+                        .next()
+                        .expect("excess replica list is not empty");
+
+                    let removed =
+                        self.transition_instance(&victim_id, InstanceStatus::Cancelled)?;
+
+                    changed.insert(removed.id.clone(), removed);
+
+                    if let Some(workload_id) = replacement_workload_id.as_ref() {
+                        let replacement =
+                            self.create_pending_replica_for_workload(deployment, workload_id)?;
+
+                        changed.insert(replacement.id.clone(), replacement);
+                    }
+                }
+            } else if active_total < deployment.desired_replicas {
+                for _ in 0..stable_deficit {
+                    let instance = self.create_pending_replica_for_workload(
+                        deployment,
+                        &canary.stable_workload_id,
+                    )?;
+
+                    changed.insert(instance.id.clone(), instance);
+                }
+
+                for _ in 0..candidate_deficit {
+                    let instance = self.create_pending_replica_for_workload(
+                        deployment,
+                        &canary.candidate_workload_id,
+                    )?;
+
+                    changed.insert(instance.id.clone(), instance);
+                }
+            }
+        }
+
+        let pending_ids = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id
+                    && instance.status == InstanceStatus::Pending
+            })
+            .map(|instance| instance.id.clone())
+            .collect::<Vec<_>>();
+
+        for instance_id in pending_ids {
+            match self.schedule_instance(&instance_id) {
+                Ok(instance) => {
+                    changed.insert(instance.id.clone(), instance);
+                }
+
+                Err(ControlError::Scheduler(SchedulerError::NoEligibleNodes { .. })) => {}
+
+                Err(error) => return Err(error),
+            }
+        }
+
+        let active_instances = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.deployment_id == deployment.id && !instance.status.is_terminal()
+            })
+            .collect::<Vec<_>>();
+
+        let stable_after = active_instances
+            .iter()
+            .filter(|instance| instance.workload_id == canary.stable_workload_id)
+            .count() as u32;
+
+        let candidate_after = active_instances
+            .iter()
+            .filter(|instance| instance.workload_id == canary.candidate_workload_id)
+            .count() as u32;
+
+        let only_expected_revisions = active_instances.iter().all(|instance| {
+            instance.workload_id == canary.stable_workload_id
+                || instance.workload_id == canary.candidate_workload_id
+        });
+
+        let all_available = active_instances
+            .iter()
+            .all(|instance| Self::rollout_replica_available(instance.status));
+
+        let converged = active_instances.len() as u32 == deployment.desired_replicas
+            && stable_after == stable_target
+            && candidate_after == candidate_target
+            && only_expected_revisions
+            && all_available;
+
+        if let Some(stored) = self.deployments.get_mut(&deployment.id) {
+            stored.status = if converged {
+                DeploymentStatus::Healthy
+            } else {
+                DeploymentStatus::Progressing
+            };
+        }
+
+        Ok(changed.into_values().collect())
     }
 
     pub fn reconcile_deployment(
@@ -325,6 +564,10 @@ impl ControlState {
             .get(id)
             .cloned()
             .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if let Some(canary) = &deployment.canary {
+            return self.reconcile_canary_deployment(&deployment, canary);
+        }
 
         let mut changed = BTreeMap::<InstanceId, Instance>::new();
 
@@ -548,6 +791,15 @@ impl ControlState {
             return Err(ControlError::WorkloadNotFound(workload_id.clone()));
         }
 
+        if self
+            .deployments
+            .get(id)
+            .and_then(|deployment| deployment.canary.as_ref())
+            .is_some()
+        {
+            return Err(ControlError::CanaryAlreadyActive(id.clone()));
+        }
+
         let deployment = self
             .deployments
             .get_mut(id)
@@ -563,6 +815,16 @@ impl ControlState {
         id: &DeploymentId,
         replicas: u32,
     ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if let Some(canary) = &current.canary {
+            canary.stable_replicas(replicas)?;
+        }
+
         let deployment = self
             .deployments
             .get_mut(id)
