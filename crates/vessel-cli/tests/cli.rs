@@ -474,3 +474,75 @@ async fn instance_invoke_reads_module_and_posts_contract() {
 
     server.abort();
 }
+
+async fn receive_artifact(
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    assert_eq!(
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/wasm"
+    );
+
+    assert_eq!(body.as_ref(), &[0_u8, 97, 115, 109]);
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "artifact": {
+                "digest": "sha256:test-upload"
+            },
+            "size_bytes": 4
+        })),
+    )
+}
+
+#[tokio::test]
+async fn artifact_push_uploads_raw_wasm() {
+    let app = Router::new().route("/v1/artifacts", post(receive_artifact));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let artifact_path = std::env::temp_dir().join(format!(
+        "vessel-cli-artifact-push-{}.wasm",
+        std::process::id()
+    ));
+
+    std::fs::write(&artifact_path, [0_u8, 97, 115, 109]).unwrap();
+
+    let artifact_arg = artifact_path.to_string_lossy().into_owned();
+
+    let registry_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--registry-url",
+        &registry_url,
+        "artifact",
+        "push",
+        &artifact_arg,
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+
+    std::fs::remove_file(&artifact_path).unwrap();
+
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["artifact"]["digest"], "sha256:test-upload");
+
+    assert_eq!(value["size_bytes"], 4);
+
+    server.abort();
+}

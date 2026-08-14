@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:7000";
+const DEFAULT_REGISTRY_URL: &str = "http://127.0.0.1:7002";
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 10_000;
 
@@ -23,6 +24,14 @@ pub struct Cli {
         help = "VESSEL control-plane URL"
     )]
     pub control_url: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "URL",
+        help = "VESSEL artifact registry URL"
+    )]
+    pub registry_url: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -61,6 +70,12 @@ pub enum Command {
     Instance {
         #[command(subcommand)]
         command: InstanceCommand,
+    },
+
+    /// Manage content-addressed artifacts.
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
     },
 }
 
@@ -210,6 +225,16 @@ pub enum InstanceCommand {
     },
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ArtifactCommand {
+    /// Upload a WebAssembly artifact to the registry.
+    Push {
+        /// WebAssembly artifact to upload.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum InstanceTransitionStatus {
     Starting,
@@ -255,7 +280,10 @@ impl Command {
             Self::Workloads => Some("/v1/workloads"),
             Self::Deployments => Some("/v1/deployments"),
             Self::Instances => Some("/v1/instances"),
-            Self::Workload { .. } | Self::Deployment { .. } | Self::Instance { .. } => None,
+            Self::Workload { .. }
+            | Self::Deployment { .. }
+            | Self::Instance { .. }
+            | Self::Artifact { .. } => None,
         }
     }
 }
@@ -306,6 +334,13 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn resolve_registry_url(cli: &Cli) -> String {
+    cli.registry_url
+        .clone()
+        .or_else(|| env::var("VESSEL_REGISTRY_URL").ok())
+        .unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string())
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("failed to build CLI HTTP client: {0}")]
@@ -329,6 +364,22 @@ pub enum CliError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("failed to read artifact {path}: {source}")]
+    ReadArtifact {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("artifact registry request failed: {0}")]
+    RegistryHttp(reqwest::Error),
+
+    #[error("artifact registry returned HTTP {status}: {message}")]
+    RegistryStatus { status: u16, message: String },
+
+    #[error("artifact registry returned invalid JSON: {0}")]
+    RegistryJson(serde_json::Error),
 }
 
 #[derive(Clone)]
@@ -409,9 +460,76 @@ impl ControlClient {
     }
 }
 
+#[derive(Clone)]
+pub struct RegistryClient {
+    client: reqwest::Client,
+    registry_url: String,
+}
+
+impl RegistryClient {
+    pub fn new(
+        registry_url: impl Into<String>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, CliError> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .build()
+            .map_err(CliError::ClientBuild)?;
+
+        Ok(Self {
+            client,
+            registry_url: registry_url.into().trim_end_matches('/').to_string(),
+        })
+    }
+
+    pub async fn push(&self, bytes: Vec<u8>) -> Result<Value, CliError> {
+        let response = self
+            .client
+            .post(format!("{}/v1/artifacts", self.registry_url))
+            .header(reqwest::header::CONTENT_TYPE, "application/wasm")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(CliError::RegistryHttp)?;
+
+        let status = response.status();
+
+        let bytes = response.bytes().await.map_err(CliError::RegistryHttp)?;
+
+        if !status.is_success() {
+            let message = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|json| json.get("error").and_then(Value::as_str).map(str::to_owned))
+                .filter(|message| !message.is_empty())
+                .unwrap_or_else(|| {
+                    let body = String::from_utf8_lossy(&bytes).trim().to_string();
+
+                    if body.is_empty() {
+                        status
+                            .canonical_reason()
+                            .unwrap_or("request failed")
+                            .to_string()
+                    } else {
+                        body
+                    }
+                });
+
+            return Err(CliError::RegistryStatus {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        serde_json::from_slice(&bytes).map_err(CliError::RegistryJson)
+    }
+}
+
 pub async fn execute(cli: Cli) -> Result<String, CliError> {
+    let registry_url = resolve_registry_url(&cli);
     let config = CliConfig::from_cli(&cli);
-    let client = ControlClient::new(config)?;
+    let client = ControlClient::new(config.clone())?;
 
     let value = match cli.command {
         command @ (Command::Health
@@ -583,6 +701,20 @@ pub async fn execute(cli: Cli) -> Result<String, CliError> {
             client
                 .post(&format!("/v1/instances/{id}/invoke"), Some(&body))
                 .await?
+        }
+
+        Command::Artifact {
+            command: ArtifactCommand::Push { file },
+        } => {
+            let bytes = std::fs::read(&file).map_err(|source| CliError::ReadArtifact {
+                path: file.display().to_string(),
+                source,
+            })?;
+
+            let registry =
+                RegistryClient::new(registry_url, config.connect_timeout, config.request_timeout)?;
+
+            registry.push(bytes).await?
         }
     };
 
