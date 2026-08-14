@@ -1,12 +1,16 @@
 use std::{
     collections::BTreeMap,
     sync::{Mutex, MutexGuard},
+    time::Duration,
 };
 
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use vessel_core::ArtifactRef;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum ArtifactCacheError {
@@ -32,13 +36,31 @@ pub struct ArtifactCache {
 
 impl ArtifactCache {
     pub fn new(registry_url: impl Into<String>) -> Self {
+        Self::with_timeouts(
+            registry_url,
+            DEFAULT_CONNECT_TIMEOUT,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .expect("default artifact registry HTTP client configuration must be valid")
+    }
+
+    pub fn with_timeouts(
+        registry_url: impl Into<String>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, ArtifactCacheError> {
         let registry_url = registry_url.into();
 
-        Self {
-            client: Client::new(),
+        let client = Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .build()?;
+
+        Ok(Self {
+            client,
             registry_url: registry_url.trim_end_matches('/').to_string(),
             entries: Mutex::new(BTreeMap::new()),
-        }
+        })
     }
 
     fn lock_entries(

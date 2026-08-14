@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Mutex, MutexGuard},
+    time::Duration,
 };
 
 use vessel_core::{
@@ -9,7 +10,9 @@ use vessel_core::{
 };
 use vessel_runtime::WasmRuntime;
 
-use crate::{ArtifactCache, ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError};
+use crate::{
+    ArtifactCache, ArtifactCacheError, ExecutionRequest, ExecutionResult, WorkerConfig, WorkerError,
+};
 
 pub struct WorkerService {
     node: Mutex<Node>,
@@ -27,6 +30,22 @@ impl WorkerService {
         Self::with_runtime_and_registry(config, WasmRuntime::new(), registry_url)
     }
 
+    pub fn with_registry_and_timeouts(
+        config: WorkerConfig,
+        registry_url: impl Into<String>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, ArtifactCacheError> {
+        let artifacts =
+            ArtifactCache::with_timeouts(registry_url, connect_timeout, request_timeout)?;
+
+        Ok(Self::with_runtime_and_artifact_cache(
+            config,
+            WasmRuntime::new(),
+            artifacts,
+        ))
+    }
+
     pub fn with_runtime(config: WorkerConfig, runtime: WasmRuntime) -> Self {
         Self::with_runtime_and_registry(config, runtime, "http://127.0.0.1:7002")
     }
@@ -35,6 +54,14 @@ impl WorkerService {
         config: WorkerConfig,
         runtime: WasmRuntime,
         registry_url: impl Into<String>,
+    ) -> Self {
+        Self::with_runtime_and_artifact_cache(config, runtime, ArtifactCache::new(registry_url))
+    }
+
+    fn with_runtime_and_artifact_cache(
+        config: WorkerConfig,
+        runtime: WasmRuntime,
+        artifacts: ArtifactCache,
     ) -> Self {
         let node = Node {
             id: config.node_id,
@@ -51,7 +78,7 @@ impl WorkerService {
             node: Mutex::new(node),
             endpoint: config.endpoint,
             runtime,
-            artifacts: ArtifactCache::new(registry_url),
+            artifacts,
         }
     }
 

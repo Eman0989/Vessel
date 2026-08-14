@@ -30,10 +30,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cluster_request_timeout_ms = env_u64("VESSEL_CLUSTER_REQUEST_TIMEOUT_MS", 5_000).max(1);
 
-    let worker = Arc::new(WorkerService::with_registry(
+    let registry_connect_timeout_ms = env_u64("VESSEL_REGISTRY_CONNECT_TIMEOUT_MS", 2_000).max(1);
+
+    let registry_request_timeout_ms = env_u64("VESSEL_REGISTRY_REQUEST_TIMEOUT_MS", 30_000).max(1);
+
+    let worker = Arc::new(WorkerService::with_registry_and_timeouts(
         WorkerConfig::new(node_id).with_endpoint(worker_url),
         registry_url,
-    ));
+        Duration::from_millis(registry_connect_timeout_ms),
+        Duration::from_millis(registry_request_timeout_ms),
+    )?);
 
     let cluster_client = ClusterClient::with_timeouts(
         control_url,
@@ -52,6 +58,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "VESSEL cluster networking connect_timeout={}ms request_timeout={}ms",
         cluster_connect_timeout_ms, cluster_request_timeout_ms,
+    );
+
+    println!(
+        "VESSEL registry networking connect_timeout={}ms request_timeout={}ms",
+        registry_connect_timeout_ms, registry_request_timeout_ms,
     );
 
     let cluster_worker = Arc::clone(&worker);

@@ -1,10 +1,13 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::get};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::sleep};
 use vessel_core::ArtifactRef;
 use vessel_worker::{ArtifactCacheError, WorkerConfig, WorkerError, WorkerService};
 
@@ -163,6 +166,53 @@ async fn registry_not_found_is_surfaced() {
         error,
         WorkerError::ArtifactCache(ArtifactCacheError::Http(_))
     ));
+
+    assert!(worker.artifact_cache().is_empty().unwrap());
+
+    server.abort();
+}
+
+async fn stall_artifact_download() -> Bytes {
+    sleep(Duration::from_millis(250)).await;
+
+    Bytes::from_static(b"abc")
+}
+
+#[tokio::test]
+async fn stalled_registry_download_times_out() {
+    let app = Router::new().route("/v1/artifacts/{digest}", get(stall_artifact_download));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let worker = WorkerService::with_registry_and_timeouts(
+        WorkerConfig::new("artifact-timeout-worker"),
+        format!("http://{address}"),
+        Duration::from_secs(1),
+        Duration::from_millis(50),
+    )
+    .unwrap();
+
+    let artifact = ArtifactRef {
+        digest: ABC_DIGEST.to_string(),
+    };
+
+    let error = worker.artifact(&artifact).await.unwrap_err();
+
+    match error {
+        WorkerError::ArtifactCache(ArtifactCacheError::Http(error)) => {
+            assert!(error.is_timeout());
+        }
+
+        other => {
+            panic!("expected registry request timeout, got {other:?}");
+        }
+    }
 
     assert!(worker.artifact_cache().is_empty().unwrap());
 
