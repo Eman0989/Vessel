@@ -1,11 +1,11 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -19,6 +19,50 @@ use crate::{ControlError, ControlState};
 
 pub type SharedState = Arc<Mutex<ControlState>>;
 type ApiError = (StatusCode, Json<ErrorResponse>);
+
+const DEFAULT_GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_GATEWAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlNetworkConfig {
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+}
+
+impl ControlNetworkConfig {
+    pub const fn new(connect_timeout: Duration, request_timeout: Duration) -> Self {
+        Self {
+            connect_timeout,
+            request_timeout,
+        }
+    }
+}
+
+impl Default for ControlNetworkConfig {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_GATEWAY_CONNECT_TIMEOUT,
+            DEFAULT_GATEWAY_REQUEST_TIMEOUT,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct GatewayClient {
+    client: reqwest::Client,
+}
+
+impl GatewayClient {
+    fn new(config: ControlNetworkConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(config.connect_timeout)
+            .timeout(config.request_timeout)
+            .build()
+            .expect("gateway HTTP client configuration must be valid");
+
+        Self { client }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -51,10 +95,23 @@ pub struct TransitionInstanceRequest {
 }
 
 pub fn router(state: ControlState) -> Router {
-    shared_router(Arc::new(Mutex::new(state)))
+    router_with_network_config(state, ControlNetworkConfig::default())
+}
+
+pub fn router_with_network_config(state: ControlState, network: ControlNetworkConfig) -> Router {
+    shared_router_with_network_config(Arc::new(Mutex::new(state)), network)
 }
 
 pub fn shared_router(state: SharedState) -> Router {
+    shared_router_with_network_config(state, ControlNetworkConfig::default())
+}
+
+pub fn shared_router_with_network_config(
+    state: SharedState,
+    network: ControlNetworkConfig,
+) -> Router {
+    let gateway = GatewayClient::new(network);
+
     Router::new()
         .route("/health", get(health))
         .route("/v1/cluster/register", post(register_worker))
@@ -73,6 +130,7 @@ pub fn shared_router(state: SharedState) -> Router {
         .route("/v1/instances/{id}/schedule", post(schedule_instance))
         .route("/v1/instances/{id}/invoke", post(invoke_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
+        .layer(Extension(gateway))
         .with_state(state)
 }
 
@@ -85,12 +143,6 @@ fn lock_state(state: &SharedState) -> Result<MutexGuard<'_, ControlState>, ApiEr
             }),
         )
     })
-}
-
-fn gateway_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 fn control_error_response(error: ControlError) -> ApiError {
@@ -289,6 +341,7 @@ async fn schedule_instance(
 
 async fn invoke_instance(
     State(state): State<SharedState>,
+    Extension(gateway): Extension<GatewayClient>,
     Path(id): Path<String>,
     Json(mut request): Json<ExecutionRequest>,
 ) -> Result<Json<ExecutionResult>, ApiError> {
@@ -346,7 +399,8 @@ async fn invoke_instance(
 
     let worker_url = format!("{}/v1/execute", endpoint.trim_end_matches('/'));
 
-    let response = gateway_client()
+    let response = gateway
+        .client
         .post(worker_url)
         .json(&request)
         .send()

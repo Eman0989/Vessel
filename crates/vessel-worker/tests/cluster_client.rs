@@ -1,9 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::sleep};
 use vessel_core::{NodeStatus, WorkerHeartbeat, WorkerRegistration};
-use vessel_worker::{ClusterClient, WorkerConfig, WorkerService};
+use vessel_worker::{ClusterClient, ClusterClientError, WorkerConfig, WorkerService};
 
 #[derive(Debug, Default)]
 struct Received {
@@ -107,6 +110,50 @@ async fn cluster_client_surfaces_rejected_heartbeat() {
     let result = client.heartbeat(&heartbeat).await;
 
     assert!(result.is_err());
+
+    server.abort();
+}
+
+async fn stall_registration(Json(_registration): Json<WorkerRegistration>) -> StatusCode {
+    sleep(Duration::from_millis(250)).await;
+
+    StatusCode::OK
+}
+
+#[tokio::test]
+async fn cluster_client_times_out_stalled_registration() {
+    let app = Router::new().route("/v1/cluster/register", post(stall_registration));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = ClusterClient::with_timeouts(
+        format!("http://{address}"),
+        Duration::from_secs(1),
+        Duration::from_millis(50),
+    )
+    .unwrap();
+
+    let worker = WorkerService::new(WorkerConfig::new("cluster-timeout-01"));
+
+    let registration = worker.registration().unwrap();
+
+    let result = client.register(&registration).await;
+
+    match result {
+        Err(ClusterClientError::Http(error)) => {
+            assert!(error.is_timeout());
+        }
+
+        other => {
+            panic!("expected cluster request timeout, got {other:?}");
+        }
+    }
 
     server.abort();
 }

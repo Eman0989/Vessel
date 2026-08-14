@@ -7,7 +7,10 @@ use std::{
 };
 
 use tokio::{net::TcpListener, time::sleep};
-use vessel_control::{ControlState, PostgresStore, SharedState, shared_router};
+use vessel_control::{
+    ControlNetworkConfig, ControlState, PostgresStore, SharedState,
+    shared_router_with_network_config,
+};
 
 fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
@@ -142,6 +145,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let persistence_interval_ms = env_u64("VESSEL_PERSIST_INTERVAL_MS", 1_000).max(100);
 
+    let gateway_connect_timeout_ms = env_u64("VESSEL_GATEWAY_CONNECT_TIMEOUT_MS", 2_000).max(1);
+
+    let gateway_request_timeout_ms = env_u64("VESSEL_GATEWAY_REQUEST_TIMEOUT_MS", 30_000).max(1);
+
+    let network_config = ControlNetworkConfig::new(
+        Duration::from_millis(gateway_connect_timeout_ms),
+        Duration::from_millis(gateway_request_timeout_ms),
+    );
+
     let (initial_state, postgres_store) = match env::var("DATABASE_URL") {
         Ok(database_url) => {
             let store = PostgresStore::connect(&database_url).await?;
@@ -180,6 +192,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         failure_timeout_ms, failure_check_interval_ms,
     );
 
+    println!(
+        "VESSEL gateway networking connect_timeout={}ms request_timeout={}ms",
+        gateway_connect_timeout_ms, gateway_request_timeout_ms,
+    );
+
     let state: SharedState = Arc::new(Mutex::new(initial_state));
 
     let detector_state = Arc::clone(&state);
@@ -205,7 +222,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ));
     }
 
-    axum::serve(listener, shared_router(state)).await?;
+    axum::serve(
+        listener,
+        shared_router_with_network_config(state, network_config),
+    )
+    .await?;
 
     Ok(())
 }

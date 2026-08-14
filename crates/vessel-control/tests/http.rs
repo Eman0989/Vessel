@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use axum::{
     body::Body,
@@ -6,9 +6,9 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::sleep};
 use tower::ServiceExt;
-use vessel_control::{ControlState, router};
+use vessel_control::{ControlNetworkConfig, ControlState, router, router_with_network_config};
 use vessel_core::{
     ArtifactRef, Deployment, DeploymentId, DeploymentStatus, ExecutionRequest, Instance,
     InstanceId, InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest,
@@ -1448,6 +1448,84 @@ async fn worker_execution_failure_is_propagated_through_gateway() {
     let json = body_json(response).await;
 
     assert!(!json["error"].as_str().unwrap().is_empty());
+
+    worker_server.abort();
+}
+
+async fn stall_worker_execution() -> StatusCode {
+    sleep(Duration::from_millis(250)).await;
+
+    StatusCode::OK
+}
+
+#[tokio::test]
+async fn invocation_gateway_times_out_stalled_worker() {
+    let worker_app =
+        axum::Router::new().route("/v1/execute", axum::routing::post(stall_worker_execution));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let worker_server = tokio::spawn(async move {
+        axum::serve(listener, worker_app).await.unwrap();
+    });
+
+    let worker_endpoint = format!("http://{address}");
+
+    let worker = vessel_worker::WorkerService::new(
+        vessel_worker::WorkerConfig::new("gateway-timeout-node").with_endpoint(worker_endpoint),
+    );
+
+    let mut state = ControlState::new();
+
+    state.register_worker(worker.registration().unwrap(), 1);
+
+    state
+        .register_workload(workload("workload-timeout"))
+        .unwrap();
+
+    let mut deployment = deployment("deployment-timeout", "workload-timeout");
+
+    deployment.desired_replicas = 1;
+
+    state.create_deployment(deployment).unwrap();
+
+    state
+        .reconcile_deployment(&vessel_core::DeploymentId::new("deployment-timeout"))
+        .unwrap();
+
+    let app = router_with_network_config(
+        state,
+        ControlNetworkConfig::new(Duration::from_secs(1), Duration::from_millis(50)),
+    );
+
+    let request = ExecutionRequest::new(b"unused", "add", 20, 22);
+
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/instances/deployment-timeout-replica-1/invoke")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to reach worker")
+    );
 
     worker_server.abort();
 }

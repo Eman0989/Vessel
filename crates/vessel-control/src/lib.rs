@@ -5,8 +5,9 @@ mod state;
 
 pub use error::ControlError;
 pub use http::{
-    AssignInstanceRequest, ErrorResponse, HealthResponse, NodeStatusRequest,
-    ScaleDeploymentRequest, SharedState, TransitionInstanceRequest, router, shared_router,
+    AssignInstanceRequest, ControlNetworkConfig, ErrorResponse, HealthResponse, NodeStatusRequest,
+    ScaleDeploymentRequest, SharedState, TransitionInstanceRequest, router,
+    router_with_network_config, shared_router, shared_router_with_network_config,
 };
 pub use persistence::{PersistenceError, PostgresStore};
 pub use state::ControlState;
