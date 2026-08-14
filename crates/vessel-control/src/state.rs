@@ -9,7 +9,7 @@ use vessel_scheduler::{Scheduler, SchedulerError};
 
 use crate::ControlError;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ControlState {
     nodes: BTreeMap<NodeId, Node>,
     workloads: BTreeMap<WorkloadId, Workload>,

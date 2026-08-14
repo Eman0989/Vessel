@@ -7,7 +7,7 @@ use std::{
 };
 
 use tokio::{net::TcpListener, time::sleep};
-use vessel_control::{ControlState, SharedState, shared_router};
+use vessel_control::{ControlState, PostgresStore, SharedState, shared_router};
 
 fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
@@ -106,6 +106,30 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
     }
 }
 
+async fn run_persistence_loop(state: SharedState, store: PostgresStore, interval_ms: u64) {
+    loop {
+        sleep(Duration::from_millis(interval_ms)).await;
+
+        // Copy the control-plane state while holding the mutex only
+        // briefly. PostgreSQL I/O happens after the lock is released.
+        let snapshot = match state.lock() {
+            Ok(state) => state.clone(),
+
+            Err(_) => {
+                eprintln!("VESSEL persistence: control state lock was poisoned");
+                continue;
+            }
+        };
+
+        if let Err(error) = store.save_snapshot(&snapshot).await {
+            eprintln!(
+                "VESSEL persistence: failed to save control state: {}",
+                error,
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let address = env::var("VESSEL_CONTROL_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
@@ -115,6 +139,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let failure_timeout_ms = env_u64("VESSEL_FAILURE_TIMEOUT_MS", 15_000);
 
     let failure_check_interval_ms = env_u64("VESSEL_FAILURE_CHECK_INTERVAL_MS", 1_000);
+
+    let persistence_interval_ms = env_u64("VESSEL_PERSIST_INTERVAL_MS", 1_000).max(100);
+
+    let (initial_state, postgres_store) = match env::var("DATABASE_URL") {
+        Ok(database_url) => {
+            let store = PostgresStore::connect(&database_url).await?;
+
+            store.migrate().await?;
+
+            let restored = store.load_snapshot().await?;
+
+            println!(
+                "VESSEL restored persistent control state: nodes={} workloads={} deployments={} instances={}",
+                restored.node_count(),
+                restored.workload_count(),
+                restored.deployment_count(),
+                restored.instance_count(),
+            );
+
+            (restored, Some(store))
+        }
+
+        Err(_) => {
+            println!("VESSEL persistence disabled: DATABASE_URL is not set");
+
+            (ControlState::new(), None)
+        }
+    };
 
     let listener = TcpListener::bind(&address).await?;
 
@@ -128,7 +180,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         failure_timeout_ms, failure_check_interval_ms,
     );
 
-    let state: SharedState = Arc::new(Mutex::new(ControlState::new()));
+    let state: SharedState = Arc::new(Mutex::new(initial_state));
 
     let detector_state = Arc::clone(&state);
 
@@ -137,6 +189,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         failure_timeout_ms,
         failure_check_interval_ms,
     ));
+
+    if let Some(store) = postgres_store {
+        println!(
+            "VESSEL persistence enabled interval={}ms",
+            persistence_interval_ms,
+        );
+
+        let persistence_state = Arc::clone(&state);
+
+        tokio::spawn(run_persistence_loop(
+            persistence_state,
+            store,
+            persistence_interval_ms,
+        ));
+    }
 
     axum::serve(listener, shared_router(state)).await?;
 
