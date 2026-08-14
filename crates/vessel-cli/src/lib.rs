@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, env, time::Duration};
+use std::{collections::BTreeMap, env, path::PathBuf, time::Duration};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Method;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -55,6 +55,12 @@ pub enum Command {
     Deployment {
         #[command(subcommand)]
         command: DeploymentCommand,
+    },
+
+    /// Manage workload instances.
+    Instance {
+        #[command(subcommand)]
+        command: InstanceCommand,
     },
 }
 
@@ -130,6 +136,105 @@ pub enum DeploymentCommand {
     },
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum InstanceCommand {
+    /// Create a pending workload instance.
+    Create {
+        /// Instance identifier.
+        #[arg(long)]
+        id: String,
+
+        /// Deployment identifier.
+        #[arg(long)]
+        deployment: String,
+
+        /// Workload identifier.
+        #[arg(long)]
+        workload: String,
+
+        /// Requested CPU in millicores.
+        #[arg(long, default_value_t = 100)]
+        cpu_millis: u32,
+
+        /// Requested memory in bytes.
+        #[arg(long, default_value_t = 67_108_864)]
+        memory_bytes: u64,
+    },
+
+    /// Assign a pending instance to a specific worker node.
+    Assign {
+        /// Instance identifier.
+        id: String,
+
+        /// Worker node identifier.
+        #[arg(long)]
+        node: String,
+    },
+
+    /// Ask the scheduler to place a pending instance.
+    Schedule {
+        /// Instance identifier.
+        id: String,
+    },
+
+    /// Advance an instance through its lifecycle.
+    Transition {
+        /// Instance identifier.
+        id: String,
+
+        /// Target lifecycle state.
+        #[arg(long, value_enum)]
+        status: InstanceTransitionStatus,
+    },
+
+    /// Invoke an assigned, starting, or running instance.
+    Invoke {
+        /// Instance identifier.
+        id: String,
+
+        /// WebAssembly module to execute.
+        #[arg(long, value_name = "FILE")]
+        module: PathBuf,
+
+        /// Exported function name.
+        #[arg(long)]
+        export: String,
+
+        /// Left-hand i32 argument.
+        #[arg(long)]
+        lhs: i32,
+
+        /// Right-hand i32 argument.
+        #[arg(long)]
+        rhs: i32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum InstanceTransitionStatus {
+    Starting,
+    Running,
+    Stopping,
+    Succeeded,
+    Failed,
+    Lost,
+    Cancelled,
+}
+
+impl InstanceTransitionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Lost => "lost",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 fn parse_key_value(value: &str) -> Result<(String, String), String> {
     let Some((key, value)) = value.split_once('=') else {
         return Err("environment variables must use KEY=VALUE syntax".to_string());
@@ -150,7 +255,7 @@ impl Command {
             Self::Workloads => Some("/v1/workloads"),
             Self::Deployments => Some("/v1/deployments"),
             Self::Instances => Some("/v1/instances"),
-            Self::Workload { .. } | Self::Deployment { .. } => None,
+            Self::Workload { .. } | Self::Deployment { .. } | Self::Instance { .. } => None,
         }
     }
 }
@@ -217,6 +322,13 @@ pub enum CliError {
 
     #[error("command is not a control-plane read command")]
     NotReadCommand,
+
+    #[error("failed to read module {path}: {source}")]
+    ReadModule {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Clone)]
@@ -378,6 +490,98 @@ pub async fn execute(cli: Cli) -> Result<String, CliError> {
         } => {
             client
                 .post(&format!("/v1/deployments/{id}/reconcile"), None)
+                .await?
+        }
+
+        Command::Instance {
+            command:
+                InstanceCommand::Create {
+                    id,
+                    deployment,
+                    workload,
+                    cpu_millis,
+                    memory_bytes,
+                },
+        } => {
+            let body = json!({
+                "id": id,
+                "deployment_id": deployment,
+                "workload_id": workload,
+                "node_id": null,
+                "status": "pending",
+                "resources": {
+                    "cpu_millis": cpu_millis,
+                    "memory_bytes": memory_bytes
+                },
+                "restart_count": 0
+            });
+
+            client.post("/v1/instances", Some(&body)).await?
+        }
+
+        Command::Instance {
+            command: InstanceCommand::Assign { id, node },
+        } => {
+            let body = json!({
+                "node_id": node
+            });
+
+            client
+                .post(&format!("/v1/instances/{id}/assign"), Some(&body))
+                .await?
+        }
+
+        Command::Instance {
+            command: InstanceCommand::Schedule { id },
+        } => {
+            client
+                .post(&format!("/v1/instances/{id}/schedule"), None)
+                .await?
+        }
+
+        Command::Instance {
+            command: InstanceCommand::Transition { id, status },
+        } => {
+            let body = json!({
+                "status": status.as_str()
+            });
+
+            client
+                .post(&format!("/v1/instances/{id}/transition"), Some(&body))
+                .await?
+        }
+
+        Command::Instance {
+            command:
+                InstanceCommand::Invoke {
+                    id,
+                    module,
+                    export,
+                    lhs,
+                    rhs,
+                },
+        } => {
+            let module_bytes = std::fs::read(&module).map_err(|source| CliError::ReadModule {
+                path: module.display().to_string(),
+                source,
+            })?;
+
+            // Placement owns the execution resource profile.
+            // The control plane replaces these values before
+            // forwarding the request to the worker.
+            let body = json!({
+                "module_bytes": module_bytes,
+                "export": export,
+                "lhs": lhs,
+                "rhs": rhs,
+                "resources": {
+                    "cpu_millis": 0,
+                    "memory_bytes": 0
+                }
+            });
+
+            client
+                .post(&format!("/v1/instances/{id}/invoke"), Some(&body))
                 .await?
         }
     };
