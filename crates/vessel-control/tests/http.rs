@@ -225,6 +225,66 @@ async fn deployment_requires_existing_workload() {
 }
 
 #[tokio::test]
+async fn deployment_creation_rejects_preloaded_canary_state() {
+    let app = test_app();
+
+    for workload_id in ["workload-v1", "workload-v2"] {
+        let body = serde_json::to_vec(&workload(workload_id)).unwrap();
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workloads")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "deployment-01",
+                        "workload_id": "workload-v1",
+                        "desired_replicas": 2,
+                        "generation": 1,
+                        "status": "pending",
+                        "canary": {
+                            "stable_workload_id":
+                                "workload-v1",
+                            "candidate_workload_id":
+                                "workload-v2",
+                            "candidate_replicas": 1
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("must start at generation 1 in pending state",),
+    );
+}
+
+#[tokio::test]
 async fn deployment_can_be_created_and_scaled() {
     let app = test_app();
 

@@ -307,7 +307,7 @@ fn restore_state(
     }
 
     for deployment in deployments {
-        state.create_deployment(deployment)?;
+        state.restore_deployment_snapshot(deployment)?;
     }
 
     for instance in instances {

@@ -48,6 +48,21 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
     }
 }
 
+fn create_healthy_deployment(state: &mut ControlState, id: &str, workload_id: &str) {
+    state.register_node(node("node-01")).unwrap();
+
+    state
+        .create_deployment(deployment(id, workload_id))
+        .unwrap();
+
+    state.reconcile_deployment(&DeploymentId::new(id)).unwrap();
+
+    assert_eq!(
+        state.deployment(&DeploymentId::new(id)).unwrap().status,
+        DeploymentStatus::Healthy,
+    );
+}
+
 fn instance(id: &str, deployment_id: &str, workload_id: &str) -> Instance {
     Instance {
         id: InstanceId::new(id),
@@ -111,6 +126,32 @@ fn duplicate_workload_is_rejected() {
     assert_eq!(
         error,
         ControlError::WorkloadAlreadyExists(WorkloadId::new("workload-01"),),
+    );
+}
+
+#[test]
+fn deployment_rejects_preloaded_release_state() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut preloaded = deployment("deployment-01", "workload-v1");
+
+    preloaded.generation = 2;
+    preloaded.status = DeploymentStatus::Progressing;
+    preloaded.previous_workload_id = Some(WorkloadId::new("workload-old"));
+
+    let error = state.create_deployment(preloaded).unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::InvalidDeploymentInitialState(DeploymentId::new("deployment-01"),),
+    );
+
+    assert!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .is_none(),
     );
 }
 
@@ -414,10 +455,7 @@ fn deployment_can_begin_canary_to_registered_workload() {
     state.register_workload(workload("workload-v1")).unwrap();
     state.register_workload(workload("workload-v2")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     let updated = state
         .begin_canary_deployment(
@@ -447,10 +485,7 @@ fn repeated_identical_canary_request_is_idempotent() {
     state.register_workload(workload("workload-v1")).unwrap();
     state.register_workload(workload("workload-v2")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     state
         .begin_canary_deployment(
@@ -481,10 +516,7 @@ fn conflicting_canary_request_is_rejected() {
     state.register_workload(workload("workload-v2")).unwrap();
     state.register_workload(workload("workload-v3")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     state
         .begin_canary_deployment(
@@ -534,10 +566,7 @@ fn canary_requires_registered_candidate_workload() {
 
     state.register_workload(workload("workload-v1")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     let error = state
         .begin_canary_deployment(
@@ -559,10 +588,7 @@ fn canary_candidate_must_differ_from_stable_workload() {
 
     state.register_workload(workload("workload-v1")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     let error = state
         .begin_canary_deployment(
@@ -585,10 +611,7 @@ fn canary_replica_count_must_preserve_stable_capacity() {
     state.register_workload(workload("workload-v1")).unwrap();
     state.register_workload(workload("workload-v2")).unwrap();
 
-    let mut stable = deployment("deployment-01", "workload-v1");
-    stable.status = DeploymentStatus::Healthy;
-
-    state.create_deployment(stable).unwrap();
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
 
     let error = state
         .begin_canary_deployment(

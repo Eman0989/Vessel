@@ -151,6 +151,35 @@ impl ControlState {
             ));
         }
 
+        if deployment.generation != 1
+            || deployment.status != DeploymentStatus::Pending
+            || deployment.previous_workload_id.is_some()
+            || deployment.canary.is_some()
+        {
+            return Err(ControlError::InvalidDeploymentInitialState(
+                deployment.id.clone(),
+            ));
+        }
+
+        self.deployments.insert(deployment.id.clone(), deployment);
+
+        Ok(())
+    }
+
+    pub(crate) fn restore_deployment_snapshot(
+        &mut self,
+        deployment: Deployment,
+    ) -> Result<(), ControlError> {
+        if self.deployments.contains_key(&deployment.id) {
+            return Err(ControlError::DeploymentAlreadyExists(deployment.id.clone()));
+        }
+
+        if !self.workloads.contains_key(&deployment.workload_id) {
+            return Err(ControlError::WorkloadNotFound(
+                deployment.workload_id.clone(),
+            ));
+        }
+
         self.deployments.insert(deployment.id.clone(), deployment);
 
         Ok(())

@@ -183,6 +183,7 @@ fn control_error_response(error: ControlError) -> ApiError {
 
         ControlError::InstanceWorkloadMismatch { .. }
         | ControlError::InstanceAssignmentRequiresNode(_)
+        | ControlError::InvalidDeploymentInitialState(_)
         | ControlError::CanaryPlan(_)
         | ControlError::Core(_) => StatusCode::UNPROCESSABLE_ENTITY,
 

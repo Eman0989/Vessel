@@ -15,6 +15,11 @@ pub enum ControlError {
     #[error("deployment {0} already exists")]
     DeploymentAlreadyExists(DeploymentId),
 
+    #[error(
+        "deployment {0} must start at generation 1 in pending state without rollback history or an active canary"
+    )]
+    InvalidDeploymentInitialState(DeploymentId),
+
     #[error("instance {0} already exists")]
     InstanceAlreadyExists(InstanceId),
 
