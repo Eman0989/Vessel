@@ -210,6 +210,171 @@ async fn deployment_scale_posts_replica_contract() {
 }
 
 #[tokio::test]
+async fn deployment_canary_posts_candidate_contract() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/canary",
+        post(
+            |Path(id): Path<String>, Json(payload): Json<Value>| async move {
+                Json(json!({
+                    "id": id,
+                    "workload_id": "workload-v1",
+                    "generation": 2,
+                    "status": "progressing",
+                    "canary": {
+                        "stable_workload_id": "workload-v1",
+                        "candidate_workload_id":
+                            payload["workload_id"],
+                        "candidate_replicas":
+                            payload["replicas"]
+                    }
+                }))
+            },
+        ),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "canary",
+        "deployment-01",
+        "--workload",
+        "workload-v2",
+        "--replicas",
+        "1",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["id"], "deployment-01");
+    assert_eq!(value["workload_id"], "workload-v1");
+    assert_eq!(value["generation"], 2);
+    assert_eq!(value["status"], "progressing");
+
+    assert_eq!(value["canary"]["stable_workload_id"], "workload-v1",);
+
+    assert_eq!(value["canary"]["candidate_workload_id"], "workload-v2",);
+
+    assert_eq!(value["canary"]["candidate_replicas"], 1,);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn deployment_promote_posts_without_payload() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/promote",
+        post(|Path(id): Path<String>| async move {
+            Json(json!({
+                "id": id,
+                "workload_id": "workload-v2",
+                "previous_workload_id": "workload-v1",
+                "generation": 3,
+                "status": "progressing"
+            }))
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "promote",
+        "deployment-01",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["id"], "deployment-01");
+    assert_eq!(value["workload_id"], "workload-v2");
+
+    assert_eq!(value["previous_workload_id"], "workload-v1",);
+
+    assert_eq!(value["generation"], 3);
+    assert_eq!(value["status"], "progressing");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn deployment_rollback_posts_without_payload() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/rollback",
+        post(|Path(id): Path<String>| async move {
+            Json(json!({
+                "id": id,
+                "workload_id": "workload-v1",
+                "previous_workload_id": "workload-v2",
+                "generation": 4,
+                "status": "progressing"
+            }))
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "rollback",
+        "deployment-01",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["id"], "deployment-01");
+    assert_eq!(value["workload_id"], "workload-v1");
+
+    assert_eq!(value["previous_workload_id"], "workload-v2",);
+
+    assert_eq!(value["generation"], 4);
+    assert_eq!(value["status"], "progressing");
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn instance_create_posts_pending_contract() {
     let app = Router::new().route("/v1/instances", post(echo_created_json));
 

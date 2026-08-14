@@ -144,6 +144,32 @@ pub enum DeploymentCommand {
         replicas: u32,
     },
 
+    /// Start a bounded canary deployment.
+    Canary {
+        /// Deployment identifier.
+        id: String,
+
+        /// Candidate workload revision.
+        #[arg(long)]
+        workload: String,
+
+        /// Number of replicas assigned to the candidate.
+        #[arg(long)]
+        replicas: u32,
+    },
+
+    /// Promote a healthy canary candidate.
+    Promote {
+        /// Deployment identifier.
+        id: String,
+    },
+
+    /// Roll back an active canary or promoted revision.
+    Rollback {
+        /// Deployment identifier.
+        id: String,
+    },
+
     /// Reconcile a deployment toward its desired replica count.
     Reconcile {
         /// Deployment identifier.
@@ -600,6 +626,40 @@ pub async fn execute(cli: Cli) -> Result<String, CliError> {
 
             client
                 .post(&format!("/v1/deployments/{id}/scale"), Some(&body))
+                .await?
+        }
+
+        Command::Deployment {
+            command:
+                DeploymentCommand::Canary {
+                    id,
+                    workload,
+                    replicas,
+                },
+        } => {
+            let body = json!({
+                "workload_id": workload,
+                "replicas": replicas
+            });
+
+            client
+                .post(&format!("/v1/deployments/{id}/canary"), Some(&body))
+                .await?
+        }
+
+        Command::Deployment {
+            command: DeploymentCommand::Promote { id },
+        } => {
+            client
+                .post(&format!("/v1/deployments/{id}/promote"), None)
+                .await?
+        }
+
+        Command::Deployment {
+            command: DeploymentCommand::Rollback { id },
+        } => {
+            client
+                .post(&format!("/v1/deployments/{id}/rollback"), None)
                 .await?
         }
 
