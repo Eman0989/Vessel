@@ -311,7 +311,7 @@ fn restore_state(
     }
 
     for instance in instances {
-        state.create_instance(instance)?;
+        state.restore_instance_snapshot(instance)?;
     }
 
     Ok(state)
@@ -321,7 +321,11 @@ fn restore_state(
 mod tests {
     use std::collections::BTreeMap;
 
-    use vessel_core::{Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest};
+    use vessel_core::{
+        ArtifactRef, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
+        InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
+        WorkloadId, WorkloadSpec, WorkloadStatus,
+    };
 
     use super::{PersistenceError, PostgresStore, restore_state};
 
@@ -394,5 +398,82 @@ mod tests {
                 value: -1,
             } if node_id == NodeId::new("node-01")
         ));
+    }
+
+    #[test]
+    fn snapshot_restoration_allows_previous_workload_revision() {
+        let old_workload = Workload {
+            id: WorkloadId::new("workload-v1"),
+            spec: WorkloadSpec {
+                name: "workload-v1".to_string(),
+                artifact: ArtifactRef {
+                    digest: "sha256:v1".to_string(),
+                },
+                resources: ResourceRequest::new(500, 67_108_864),
+                timeout_ms: 5_000,
+                environment: BTreeMap::new(),
+            },
+            status: WorkloadStatus::Ready,
+        };
+
+        let target_workload = Workload {
+            id: WorkloadId::new("workload-v2"),
+            spec: WorkloadSpec {
+                name: "workload-v2".to_string(),
+                artifact: ArtifactRef {
+                    digest: "sha256:v2".to_string(),
+                },
+                resources: ResourceRequest::new(500, 67_108_864),
+                timeout_ms: 5_000,
+                environment: BTreeMap::new(),
+            },
+            status: WorkloadStatus::Ready,
+        };
+
+        let deployment = Deployment {
+            id: DeploymentId::new("deployment-01"),
+            workload_id: WorkloadId::new("workload-v2"),
+            desired_replicas: 1,
+            generation: 2,
+            status: DeploymentStatus::Progressing,
+        };
+
+        let old_instance = Instance {
+            id: InstanceId::new("deployment-01-replica-1"),
+            deployment_id: DeploymentId::new("deployment-01"),
+            workload_id: WorkloadId::new("workload-v1"),
+            node_id: None,
+            status: InstanceStatus::Pending,
+            resources: ResourceRequest::new(500, 67_108_864),
+            restart_count: 0,
+        };
+
+        let state = restore_state(
+            Vec::new(),
+            vec![old_workload, target_workload],
+            vec![deployment],
+            vec![old_instance],
+        )
+        .unwrap();
+
+        let restored_deployment = state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap();
+
+        assert_eq!(
+            restored_deployment.workload_id,
+            WorkloadId::new("workload-v2")
+        );
+
+        assert_eq!(restored_deployment.generation, 2);
+
+        let restored_instance = state
+            .instance(&InstanceId::new("deployment-01-replica-1"))
+            .unwrap();
+
+        assert_eq!(
+            restored_instance.workload_id,
+            WorkloadId::new("workload-v1")
+        );
     }
 }

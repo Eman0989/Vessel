@@ -179,6 +179,35 @@ impl ControlState {
         Ok(())
     }
 
+    pub(crate) fn restore_instance_snapshot(
+        &mut self,
+        instance: Instance,
+    ) -> Result<(), ControlError> {
+        if self.instances.contains_key(&instance.id) {
+            return Err(ControlError::InstanceAlreadyExists(instance.id.clone()));
+        }
+
+        if !self.deployments.contains_key(&instance.deployment_id) {
+            return Err(ControlError::DeploymentNotFound(
+                instance.deployment_id.clone(),
+            ));
+        }
+
+        if !self.workloads.contains_key(&instance.workload_id) {
+            return Err(ControlError::WorkloadNotFound(instance.workload_id.clone()));
+        }
+
+        if let Some(node_id) = &instance.node_id
+            && !self.nodes.contains_key(node_id)
+        {
+            return Err(ControlError::NodeNotFound(node_id.clone()));
+        }
+
+        self.instances.insert(instance.id.clone(), instance);
+
+        Ok(())
+    }
+
     pub fn node(&self, id: &NodeId) -> Option<&Node> {
         self.nodes.get(id)
     }
