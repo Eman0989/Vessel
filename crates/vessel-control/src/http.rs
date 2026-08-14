@@ -159,7 +159,10 @@ fn control_error_response(error: ControlError) -> ApiError {
         | ControlError::DeploymentAlreadyExists(_)
         | ControlError::InstanceAlreadyExists(_)
         | ControlError::CanaryAlreadyActive(_)
-        | ControlError::CanaryRequiresHealthyDeployment { .. } => StatusCode::CONFLICT,
+        | ControlError::CanaryRequiresHealthyDeployment { .. }
+        | ControlError::CanaryNotActive(_)
+        | ControlError::CanaryNotReady { .. }
+        | ControlError::RollbackUnavailable(_) => StatusCode::CONFLICT,
 
         ControlError::NodeNotFound(_)
         | ControlError::WorkloadNotFound(_)

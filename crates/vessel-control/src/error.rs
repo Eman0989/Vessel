@@ -41,6 +41,20 @@ pub enum ControlError {
         status: DeploymentStatus,
     },
 
+    #[error("deployment {0} does not have an active canary")]
+    CanaryNotActive(DeploymentId),
+
+    #[error(
+        "deployment {deployment_id} canary is not ready for promotion; current status is {status:?}"
+    )]
+    CanaryNotReady {
+        deployment_id: DeploymentId,
+        status: DeploymentStatus,
+    },
+
+    #[error("deployment {0} has no rollback workload revision")]
+    RollbackUnavailable(DeploymentId),
+
     #[error(transparent)]
     CanaryPlan(#[from] CanaryPlanError),
 

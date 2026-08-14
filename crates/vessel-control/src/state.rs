@@ -778,6 +778,82 @@ impl ControlState {
         Ok(deployment.clone())
     }
 
+    pub fn promote_canary_deployment(
+        &mut self,
+        id: &DeploymentId,
+    ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        let canary = current
+            .canary
+            .clone()
+            .ok_or_else(|| ControlError::CanaryNotActive(id.clone()))?;
+
+        if current.status != DeploymentStatus::Healthy {
+            return Err(ControlError::CanaryNotReady {
+                deployment_id: id.clone(),
+                status: current.status,
+            });
+        }
+
+        if !self.workloads.contains_key(&canary.candidate_workload_id) {
+            return Err(ControlError::WorkloadNotFound(canary.candidate_workload_id));
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.canary = None;
+        deployment.rollout_to(canary.candidate_workload_id);
+
+        Ok(deployment.clone())
+    }
+
+    pub fn rollback_deployment(&mut self, id: &DeploymentId) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if current.canary.is_some() {
+            let deployment = self
+                .deployments
+                .get_mut(id)
+                .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+            deployment.canary = None;
+            deployment.generation += 1;
+            deployment.status = DeploymentStatus::Progressing;
+
+            return Ok(deployment.clone());
+        }
+
+        let previous_workload_id = current
+            .previous_workload_id
+            .clone()
+            .ok_or_else(|| ControlError::RollbackUnavailable(id.clone()))?;
+
+        if !self.workloads.contains_key(&previous_workload_id) {
+            return Err(ControlError::WorkloadNotFound(previous_workload_id));
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.rollout_to(previous_workload_id);
+
+        Ok(deployment.clone())
+    }
+
     pub fn rollout_deployment(
         &mut self,
         id: &DeploymentId,
