@@ -1529,3 +1529,240 @@ async fn invocation_gateway_times_out_stalled_worker() {
 
     worker_server.abort();
 }
+
+#[tokio::test]
+async fn deployment_can_begin_rollout_over_http() {
+    let app = test_app();
+
+    for workload_id in ["workload-v1", "workload-v2"] {
+        let body = serde_json::to_vec(&workload(workload_id)).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workloads")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-v1")).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/rollout")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "workload_id": "workload-v2"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["workload_id"], "workload-v2");
+    assert_eq!(json["generation"], 2);
+    assert_eq!(json["status"], "progressing");
+}
+
+#[tokio::test]
+async fn repeated_deployment_rollout_is_idempotent_over_http() {
+    let app = test_app();
+
+    for workload_id in ["workload-v1", "workload-v2"] {
+        let body = serde_json::to_vec(&workload(workload_id)).unwrap();
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workloads")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-v1")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/deployments/deployment-01/rollout")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "workload_id": "workload-v2"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let json = body_json(response).await;
+
+        assert_eq!(json["workload_id"], "workload-v2");
+        assert_eq!(json["generation"], 2);
+        assert_eq!(json["status"], "progressing");
+    }
+}
+
+#[tokio::test]
+async fn rollout_missing_workload_returns_not_found_over_http() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&workload("workload-v1")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::to_vec(&deployment("deployment-01", "workload-v1")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/rollout")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "workload_id": "missing-workload"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("workload missing-workload was not found")
+    );
+}
+
+#[tokio::test]
+async fn rollout_missing_deployment_returns_not_found_over_http() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&workload("workload-v2")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/missing/rollout")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "workload_id": "workload-v2"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("deployment missing was not found")
+    );
+}
