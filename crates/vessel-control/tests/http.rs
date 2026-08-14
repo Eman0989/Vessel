@@ -58,6 +58,7 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         status: DeploymentStatus::Pending,
         previous_workload_id: None,
         canary: None,
+        autoscaling: None,
     }
 }
 
@@ -281,6 +282,62 @@ async fn deployment_creation_rejects_preloaded_canary_state() {
             .as_str()
             .unwrap()
             .contains("must start at generation 1 in pending state",),
+    );
+}
+
+#[tokio::test]
+async fn deployment_creation_rejects_preloaded_autoscaling_policy_over_http() {
+    let app = test_app();
+
+    let workload_body = serde_json::to_vec(&workload("workload-v1")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "deployment-autoscaling",
+                        "workload_id": "workload-v1",
+                        "desired_replicas": 2,
+                        "generation": 1,
+                        "status": "pending",
+                        "autoscaling": {
+                            "min_replicas": 1,
+                            "max_replicas": 4,
+                            "target_cpu_utilization_percent": 70
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("autoscaling policy"),
     );
 }
 

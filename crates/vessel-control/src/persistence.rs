@@ -322,9 +322,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use vessel_core::{
-        ArtifactRef, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
-        InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
-        WorkloadId, WorkloadSpec, WorkloadStatus,
+        ArtifactRef, AutoscalingPolicy, Deployment, DeploymentId, DeploymentStatus, Instance,
+        InstanceId, InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest,
+        Workload, WorkloadId, WorkloadSpec, WorkloadStatus,
     };
 
     use super::{PersistenceError, PostgresStore, restore_state};
@@ -438,6 +438,7 @@ mod tests {
             status: DeploymentStatus::Progressing,
             previous_workload_id: Some(WorkloadId::new("workload-v1")),
             canary: None,
+            autoscaling: Some(AutoscalingPolicy::new(1, 4, 70).unwrap()),
         };
 
         let old_instance = Instance {
@@ -468,6 +469,11 @@ mod tests {
         );
 
         assert_eq!(restored_deployment.generation, 2);
+
+        assert_eq!(
+            restored_deployment.autoscaling,
+            Some(AutoscalingPolicy::new(1, 4, 70).unwrap()),
+        );
 
         let restored_instance = state
             .instance(&InstanceId::new("deployment-01-replica-1"))

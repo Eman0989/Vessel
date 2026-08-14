@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use vessel_control::{ControlError, ControlState};
 use vessel_core::{
-    ArtifactRef, CanaryPlanError, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
-    InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
-    WorkloadId, WorkloadSpec, WorkloadStatus,
+    ArtifactRef, AutoscalingPolicy, CanaryPlanError, Deployment, DeploymentId, DeploymentStatus,
+    Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity,
+    ResourceRequest, Workload, WorkloadId, WorkloadSpec, WorkloadStatus,
 };
 
 fn node(id: &str) -> Node {
@@ -45,6 +45,7 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         status: DeploymentStatus::Pending,
         previous_workload_id: None,
         canary: None,
+        autoscaling: None,
     }
 }
 
@@ -151,6 +152,30 @@ fn deployment_rejects_preloaded_release_state() {
     assert!(
         state
             .deployment(&DeploymentId::new("deployment-01"))
+            .is_none(),
+    );
+}
+
+#[test]
+fn deployment_rejects_preloaded_autoscaling_policy() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut preloaded = deployment("deployment-autoscaling", "workload-v1");
+
+    preloaded.autoscaling = Some(AutoscalingPolicy::new(1, 4, 70).unwrap());
+
+    let error = state.create_deployment(preloaded).unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::InvalidDeploymentInitialState(DeploymentId::new("deployment-autoscaling"),),
+    );
+
+    assert!(
+        state
+            .deployment(&DeploymentId::new("deployment-autoscaling"))
             .is_none(),
     );
 }

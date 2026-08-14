@@ -83,6 +83,7 @@ fn deployment_scaling_increments_generation() {
         status: DeploymentStatus::Healthy,
         previous_workload_id: None,
         canary: None,
+        autoscaling: None,
     };
 
     deployment.scale_to(8);

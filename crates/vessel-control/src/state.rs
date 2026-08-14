@@ -155,6 +155,7 @@ impl ControlState {
             || deployment.status != DeploymentStatus::Pending
             || deployment.previous_workload_id.is_some()
             || deployment.canary.is_some()
+            || deployment.autoscaling.is_some()
         {
             return Err(ControlError::InvalidDeploymentInitialState(
                 deployment.id.clone(),

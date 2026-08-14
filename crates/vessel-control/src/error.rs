@@ -16,7 +16,7 @@ pub enum ControlError {
     DeploymentAlreadyExists(DeploymentId),
 
     #[error(
-        "deployment {0} must start at generation 1 in pending state without rollback history or an active canary"
+        "deployment {0} must start at generation 1 in pending state without rollback history, an active canary, or an autoscaling policy"
     )]
     InvalidDeploymentInitialState(DeploymentId),
 

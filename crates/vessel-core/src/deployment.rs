@@ -1,4 +1,4 @@
-use crate::{DeploymentId, WorkloadId};
+use crate::{AutoscalingPolicy, DeploymentId, WorkloadId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -88,6 +88,9 @@ pub struct Deployment {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary: Option<CanaryPlan>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoscaling: Option<AutoscalingPolicy>,
 }
 
 impl Deployment {
@@ -132,6 +135,7 @@ mod tests {
             status: DeploymentStatus::Healthy,
             previous_workload_id: None,
             canary: None,
+            autoscaling: None,
         }
     }
 
@@ -230,6 +234,7 @@ mod tests {
 
         assert_eq!(deployment.previous_workload_id, None);
         assert_eq!(deployment.canary, None);
+        assert_eq!(deployment.autoscaling, None);
     }
 
     #[test]
@@ -245,6 +250,19 @@ mod tests {
             )
             .unwrap(),
         );
+
+        let json = serde_json::to_string(&deployment).unwrap();
+
+        let restored: Deployment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, deployment);
+    }
+
+    #[test]
+    fn deployment_autoscaling_policy_round_trips_through_json() {
+        let mut deployment = deployment();
+
+        deployment.autoscaling = Some(AutoscalingPolicy::new(1, 8, 70).unwrap());
 
         let json = serde_json::to_string(&deployment).unwrap();
 
