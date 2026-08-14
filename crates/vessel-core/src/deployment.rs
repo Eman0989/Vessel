@@ -82,6 +82,9 @@ pub struct Deployment {
     pub desired_replicas: u32,
     pub generation: u64,
     pub status: DeploymentStatus,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<CanaryPlan>,
 }
 
 impl Deployment {
@@ -122,6 +125,7 @@ mod tests {
             desired_replicas: 3,
             generation: 1,
             status: DeploymentStatus::Healthy,
+            canary: None,
         }
     }
 
@@ -204,6 +208,42 @@ mod tests {
                 candidate_replicas: 2,
             }),
         );
+    }
+
+    #[test]
+    fn deployment_without_canary_field_deserializes_as_none() {
+        let value = serde_json::json!({
+            "id": "deployment-01",
+            "workload_id": "workload-v1",
+            "desired_replicas": 3,
+            "generation": 1,
+            "status": "healthy"
+        });
+
+        let deployment: Deployment = serde_json::from_value(value).unwrap();
+
+        assert_eq!(deployment.canary, None);
+    }
+
+    #[test]
+    fn deployment_canary_state_round_trips_through_json() {
+        let mut deployment = deployment();
+
+        deployment.canary = Some(
+            CanaryPlan::new(
+                WorkloadId::new("workload-v1"),
+                WorkloadId::new("workload-v2"),
+                3,
+                1,
+            )
+            .unwrap(),
+        );
+
+        let json = serde_json::to_string(&deployment).unwrap();
+
+        let restored: Deployment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored, deployment);
     }
 
     #[test]

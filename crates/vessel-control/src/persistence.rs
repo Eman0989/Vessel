@@ -436,6 +436,7 @@ mod tests {
             desired_replicas: 1,
             generation: 2,
             status: DeploymentStatus::Progressing,
+            canary: None,
         };
 
         let old_instance = Instance {
