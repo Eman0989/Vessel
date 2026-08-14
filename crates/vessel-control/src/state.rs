@@ -357,6 +357,29 @@ impl ControlState {
         Ok(changed.into_values().collect())
     }
 
+    pub fn rollout_deployment(
+        &mut self,
+        id: &DeploymentId,
+        workload_id: &WorkloadId,
+    ) -> Result<Deployment, ControlError> {
+        if !self.deployments.contains_key(id) {
+            return Err(ControlError::DeploymentNotFound(id.clone()));
+        }
+
+        if !self.workloads.contains_key(workload_id) {
+            return Err(ControlError::WorkloadNotFound(workload_id.clone()));
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.rollout_to(workload_id.clone());
+
+        Ok(deployment.clone())
+    }
+
     pub fn scale_deployment(
         &mut self,
         id: &DeploymentId,

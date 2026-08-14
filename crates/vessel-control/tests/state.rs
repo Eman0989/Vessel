@@ -303,6 +303,109 @@ fn scaling_to_same_replica_count_preserves_generation() {
 }
 
 #[test]
+fn deployment_can_begin_rollout_to_registered_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let updated = state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap();
+
+    assert_eq!(updated.workload_id, WorkloadId::new("workload-v2"));
+
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.status, DeploymentStatus::Progressing);
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.workload_id, WorkloadId::new("workload-v2"));
+}
+
+#[test]
+fn deployment_rollout_to_same_workload_is_idempotent() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let updated = state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v1"),
+        )
+        .unwrap();
+
+    assert_eq!(updated.workload_id, WorkloadId::new("workload-v1"));
+
+    assert_eq!(updated.generation, 1);
+    assert_eq!(updated.status, DeploymentStatus::Pending);
+}
+
+#[test]
+fn deployment_rollout_requires_registered_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let error = state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("missing-workload"),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::WorkloadNotFound(WorkloadId::new("missing-workload"))
+    );
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.workload_id, WorkloadId::new("workload-v1"));
+
+    assert_eq!(stored.generation, 1);
+}
+
+#[test]
+fn deployment_rollout_requires_existing_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let error = state
+        .rollout_deployment(
+            &DeploymentId::new("missing-deployment"),
+            &WorkloadId::new("workload-v2"),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment"))
+    );
+}
+
+#[test]
 fn instance_can_be_assigned_to_existing_node() {
     let mut state = ControlState::new();
 
