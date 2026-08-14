@@ -9,7 +9,10 @@ mod node;
 mod resources;
 mod workload;
 
-pub use autoscaling::{AutoscalingPolicy, AutoscalingPolicyError};
+pub use autoscaling::{
+    AutoscalingDecision, AutoscalingDecisionError, AutoscalingDirection, AutoscalingPolicy,
+    AutoscalingPolicyError,
+};
 pub use cluster::{WorkerHeartbeat, WorkerRegistration};
 pub use deployment::{CanaryPlan, CanaryPlanError, Deployment, DeploymentStatus};
 pub use error::CoreError;

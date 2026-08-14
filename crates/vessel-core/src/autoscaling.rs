@@ -8,6 +8,31 @@ pub struct AutoscalingPolicy {
     pub target_cpu_utilization_percent: u8,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoscalingDirection {
+    ScaleUp,
+    ScaleDown,
+    Stable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutoscalingDecision {
+    pub current_replicas: u32,
+    pub desired_replicas: u32,
+    pub observed_cpu_utilization_percent: u8,
+    pub target_cpu_utilization_percent: u8,
+    pub direction: AutoscalingDirection,
+}
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum AutoscalingDecisionError {
+    #[error(
+        "observed CPU utilization must be between 0 and 100 percent: observed={observed_percent}"
+    )]
+    InvalidObservedCpuUtilization { observed_percent: u8 },
+}
+
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum AutoscalingPolicyError {
     #[error("autoscaling minimum replicas must be at least 1")]
@@ -61,6 +86,50 @@ impl AutoscalingPolicy {
 
     pub fn contains_replicas(&self, replicas: u32) -> bool {
         (self.min_replicas..=self.max_replicas).contains(&replicas)
+    }
+
+    pub fn decide(
+        &self,
+        current_replicas: u32,
+        observed_cpu_utilization_percent: u8,
+    ) -> Result<AutoscalingDecision, AutoscalingDecisionError> {
+        if observed_cpu_utilization_percent > 100 {
+            return Err(AutoscalingDecisionError::InvalidObservedCpuUtilization {
+                observed_percent: observed_cpu_utilization_percent,
+            });
+        }
+
+        let numerator = u64::from(current_replicas) * u64::from(observed_cpu_utilization_percent);
+
+        let denominator = u64::from(self.target_cpu_utilization_percent);
+
+        // Integer ceiling division implements:
+        //
+        // ceil(
+        //   current replicas * observed utilization
+        //   / target utilization
+        // )
+        //
+        // Calculating in u64 avoids overflow for u32 replica
+        // counts before the result is bounded by the policy.
+        let raw_desired = numerator.div_ceil(denominator);
+
+        let desired_replicas =
+            raw_desired.clamp(u64::from(self.min_replicas), u64::from(self.max_replicas)) as u32;
+
+        let direction = match desired_replicas.cmp(&current_replicas) {
+            std::cmp::Ordering::Greater => AutoscalingDirection::ScaleUp,
+            std::cmp::Ordering::Less => AutoscalingDirection::ScaleDown,
+            std::cmp::Ordering::Equal => AutoscalingDirection::Stable,
+        };
+
+        Ok(AutoscalingDecision {
+            current_replicas,
+            desired_replicas,
+            observed_cpu_utilization_percent,
+            target_cpu_utilization_percent: self.target_cpu_utilization_percent,
+            direction,
+        })
     }
 }
 
@@ -121,6 +190,77 @@ mod tests {
         assert_eq!(policy.clamp_replicas(1), 2);
         assert_eq!(policy.clamp_replicas(6), 6);
         assert_eq!(policy.clamp_replicas(15), 10);
+    }
+
+    #[test]
+    fn utilization_at_target_keeps_replica_count_stable() {
+        let policy = AutoscalingPolicy::new(1, 10, 70).unwrap();
+
+        let decision = policy.decide(4, 70).unwrap();
+
+        assert_eq!(decision.current_replicas, 4);
+        assert_eq!(decision.desired_replicas, 4);
+        assert_eq!(decision.direction, AutoscalingDirection::Stable,);
+    }
+
+    #[test]
+    fn utilization_above_target_scales_up_with_ceiling() {
+        let policy = AutoscalingPolicy::new(1, 10, 70).unwrap();
+
+        let decision = policy.decide(4, 80).unwrap();
+
+        assert_eq!(decision.desired_replicas, 5);
+        assert_eq!(decision.direction, AutoscalingDirection::ScaleUp,);
+    }
+
+    #[test]
+    fn utilization_below_target_scales_down() {
+        let policy = AutoscalingPolicy::new(1, 10, 70).unwrap();
+
+        let decision = policy.decide(4, 35).unwrap();
+
+        assert_eq!(decision.desired_replicas, 2);
+        assert_eq!(decision.direction, AutoscalingDirection::ScaleDown,);
+    }
+
+    #[test]
+    fn decision_respects_minimum_replica_bound() {
+        let policy = AutoscalingPolicy::new(2, 10, 70).unwrap();
+
+        let decision = policy.decide(4, 0).unwrap();
+
+        assert_eq!(decision.desired_replicas, 2);
+    }
+
+    #[test]
+    fn decision_respects_maximum_replica_bound() {
+        let policy = AutoscalingPolicy::new(1, 6, 50).unwrap();
+
+        let decision = policy.decide(5, 100).unwrap();
+
+        assert_eq!(decision.desired_replicas, 6);
+    }
+
+    #[test]
+    fn zero_replicas_recover_to_policy_minimum() {
+        let policy = AutoscalingPolicy::new(2, 10, 70).unwrap();
+
+        let decision = policy.decide(0, 0).unwrap();
+
+        assert_eq!(decision.desired_replicas, 2);
+        assert_eq!(decision.direction, AutoscalingDirection::ScaleUp,);
+    }
+
+    #[test]
+    fn observed_cpu_above_one_hundred_is_rejected() {
+        let policy = AutoscalingPolicy::new(1, 10, 70).unwrap();
+
+        assert_eq!(
+            policy.decide(4, 101),
+            Err(AutoscalingDecisionError::InvalidObservedCpuUtilization {
+                observed_percent: 101,
+            }),
+        );
     }
 
     #[test]
