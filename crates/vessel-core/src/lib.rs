@@ -9,7 +9,7 @@ mod resources;
 mod workload;
 
 pub use cluster::{WorkerHeartbeat, WorkerRegistration};
-pub use deployment::{Deployment, DeploymentStatus};
+pub use deployment::{CanaryPlan, CanaryPlanError, Deployment, DeploymentStatus};
 pub use error::CoreError;
 pub use execution::{ExecutionRequest, ExecutionResult};
 pub use ids::{DeploymentId, InstanceId, NodeId, WorkloadId};

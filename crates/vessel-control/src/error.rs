@@ -1,5 +1,7 @@
 use thiserror::Error;
-use vessel_core::{CoreError, DeploymentId, InstanceId, NodeId, WorkloadId};
+use vessel_core::{
+    CanaryPlanError, CoreError, DeploymentId, DeploymentStatus, InstanceId, NodeId, WorkloadId,
+};
 use vessel_scheduler::SchedulerError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -12,6 +14,11 @@ pub enum ControlError {
 
     #[error("deployment {0} already exists")]
     DeploymentAlreadyExists(DeploymentId),
+
+    #[error(
+        "deployment {0} must start at generation 1 in pending state without rollback history or an active canary"
+    )]
+    InvalidDeploymentInitialState(DeploymentId),
 
     #[error("instance {0} already exists")]
     InstanceAlreadyExists(InstanceId),
@@ -27,6 +34,34 @@ pub enum ControlError {
 
     #[error("instance {0} was not found")]
     InstanceNotFound(InstanceId),
+
+    #[error("deployment {0} already has an active canary")]
+    CanaryAlreadyActive(DeploymentId),
+
+    #[error(
+        "deployment {deployment_id} must be healthy before starting a canary; current status is {status:?}"
+    )]
+    CanaryRequiresHealthyDeployment {
+        deployment_id: DeploymentId,
+        status: DeploymentStatus,
+    },
+
+    #[error("deployment {0} does not have an active canary")]
+    CanaryNotActive(DeploymentId),
+
+    #[error(
+        "deployment {deployment_id} canary is not ready for promotion; current status is {status:?}"
+    )]
+    CanaryNotReady {
+        deployment_id: DeploymentId,
+        status: DeploymentStatus,
+    },
+
+    #[error("deployment {0} has no rollback workload revision")]
+    RollbackUnavailable(DeploymentId),
+
+    #[error(transparent)]
+    CanaryPlan(#[from] CanaryPlanError),
 
     #[error(
         "instance {instance_id} workload {instance_workload_id} does not match deployment workload {deployment_workload_id}"

@@ -91,6 +91,12 @@ pub struct RolloutDeploymentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CanaryDeploymentRequest {
+    pub workload_id: WorkloadId,
+    pub replicas: u32,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AssignInstanceRequest {
     pub node_id: NodeId,
 }
@@ -131,6 +137,12 @@ pub fn shared_router_with_network_config(
         )
         .route("/v1/deployments/{id}/scale", post(scale_deployment))
         .route("/v1/deployments/{id}/rollout", post(rollout_deployment))
+        .route("/v1/deployments/{id}/canary", post(begin_canary_deployment))
+        .route(
+            "/v1/deployments/{id}/promote",
+            post(promote_canary_deployment),
+        )
+        .route("/v1/deployments/{id}/rollback", post(rollback_deployment))
         .route("/v1/deployments/{id}/reconcile", post(reconcile_deployment))
         .route("/v1/instances", get(list_instances).post(create_instance))
         .route("/v1/instances/{id}/assign", post(assign_instance))
@@ -157,7 +169,12 @@ fn control_error_response(error: ControlError) -> ApiError {
         ControlError::NodeAlreadyExists(_)
         | ControlError::WorkloadAlreadyExists(_)
         | ControlError::DeploymentAlreadyExists(_)
-        | ControlError::InstanceAlreadyExists(_) => StatusCode::CONFLICT,
+        | ControlError::InstanceAlreadyExists(_)
+        | ControlError::CanaryAlreadyActive(_)
+        | ControlError::CanaryRequiresHealthyDeployment { .. }
+        | ControlError::CanaryNotActive(_)
+        | ControlError::CanaryNotReady { .. }
+        | ControlError::RollbackUnavailable(_) => StatusCode::CONFLICT,
 
         ControlError::NodeNotFound(_)
         | ControlError::WorkloadNotFound(_)
@@ -166,6 +183,8 @@ fn control_error_response(error: ControlError) -> ApiError {
 
         ControlError::InstanceWorkloadMismatch { .. }
         | ControlError::InstanceAssignmentRequiresNode(_)
+        | ControlError::InvalidDeploymentInitialState(_)
+        | ControlError::CanaryPlan(_)
         | ControlError::Core(_) => StatusCode::UNPROCESSABLE_ENTITY,
 
         ControlError::Scheduler(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -288,6 +307,44 @@ async fn scale_deployment(
 ) -> Result<Json<Deployment>, ApiError> {
     let deployment = lock_state(&state)?
         .scale_deployment(&DeploymentId::new(id), request.replicas)
+        .map_err(control_error_response)?;
+
+    Ok(Json(deployment))
+}
+
+async fn begin_canary_deployment(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(request): Json<CanaryDeploymentRequest>,
+) -> Result<Json<Deployment>, ApiError> {
+    let deployment = lock_state(&state)?
+        .begin_canary_deployment(
+            &DeploymentId::new(id),
+            &request.workload_id,
+            request.replicas,
+        )
+        .map_err(control_error_response)?;
+
+    Ok(Json(deployment))
+}
+
+async fn promote_canary_deployment(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Deployment>, ApiError> {
+    let deployment = lock_state(&state)?
+        .promote_canary_deployment(&DeploymentId::new(id))
+        .map_err(control_error_response)?;
+
+    Ok(Json(deployment))
+}
+
+async fn rollback_deployment(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Deployment>, ApiError> {
+    let deployment = lock_state(&state)?
+        .rollback_deployment(&DeploymentId::new(id))
         .map_err(control_error_response)?;
 
     Ok(Json(deployment))

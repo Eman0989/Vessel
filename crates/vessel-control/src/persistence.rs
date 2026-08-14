@@ -307,7 +307,7 @@ fn restore_state(
     }
 
     for deployment in deployments {
-        state.create_deployment(deployment)?;
+        state.restore_deployment_snapshot(deployment)?;
     }
 
     for instance in instances {
@@ -436,6 +436,8 @@ mod tests {
             desired_replicas: 1,
             generation: 2,
             status: DeploymentStatus::Progressing,
+            previous_workload_id: Some(WorkloadId::new("workload-v1")),
+            canary: None,
         };
 
         let old_instance = Instance {

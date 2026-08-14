@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use vessel_control::{ControlError, ControlState};
 use vessel_core::{
-    ArtifactRef, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus,
-    Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload, WorkloadId,
-    WorkloadSpec, WorkloadStatus,
+    ArtifactRef, CanaryPlanError, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
+    InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
+    WorkloadId, WorkloadSpec, WorkloadStatus,
 };
 
 fn node(id: &str) -> Node {
@@ -43,7 +43,24 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         desired_replicas: 2,
         generation: 1,
         status: DeploymentStatus::Pending,
+        previous_workload_id: None,
+        canary: None,
     }
+}
+
+fn create_healthy_deployment(state: &mut ControlState, id: &str, workload_id: &str) {
+    state.register_node(node("node-01")).unwrap();
+
+    state
+        .create_deployment(deployment(id, workload_id))
+        .unwrap();
+
+    state.reconcile_deployment(&DeploymentId::new(id)).unwrap();
+
+    assert_eq!(
+        state.deployment(&DeploymentId::new(id)).unwrap().status,
+        DeploymentStatus::Healthy,
+    );
 }
 
 fn instance(id: &str, deployment_id: &str, workload_id: &str) -> Instance {
@@ -109,6 +126,32 @@ fn duplicate_workload_is_rejected() {
     assert_eq!(
         error,
         ControlError::WorkloadAlreadyExists(WorkloadId::new("workload-01"),),
+    );
+}
+
+#[test]
+fn deployment_rejects_preloaded_release_state() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut preloaded = deployment("deployment-01", "workload-v1");
+
+    preloaded.generation = 2;
+    preloaded.status = DeploymentStatus::Progressing;
+    preloaded.previous_workload_id = Some(WorkloadId::new("workload-old"));
+
+    let error = state.create_deployment(preloaded).unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::InvalidDeploymentInitialState(DeploymentId::new("deployment-01"),),
+    );
+
+    assert!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .is_none(),
     );
 }
 
@@ -402,6 +445,791 @@ fn deployment_rollout_requires_existing_deployment() {
     assert_eq!(
         error,
         ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment"))
+    );
+}
+
+#[test]
+fn deployment_can_begin_canary_to_registered_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    let updated = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(updated.workload_id, WorkloadId::new("workload-v1"),);
+
+    let plan = updated.canary.as_ref().unwrap();
+
+    assert_eq!(plan.stable_workload_id, WorkloadId::new("workload-v1"),);
+
+    assert_eq!(plan.candidate_workload_id, WorkloadId::new("workload-v2"),);
+
+    assert_eq!(plan.candidate_replicas, 1);
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.status, DeploymentStatus::Progressing);
+}
+
+#[test]
+fn repeated_identical_canary_request_is_idempotent() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let repeated = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(repeated.generation, 2);
+    assert_eq!(repeated.status, DeploymentStatus::Progressing);
+    assert!(repeated.canary.is_some());
+}
+
+#[test]
+fn conflicting_canary_request_is_rejected() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+    state.register_workload(workload("workload-v3")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v3"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryAlreadyActive(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn canary_requires_existing_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("missing-deployment"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment"),),
+    );
+}
+
+#[test]
+fn canary_requires_registered_candidate_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("missing-workload"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::WorkloadNotFound(WorkloadId::new("missing-workload"),),
+    );
+}
+
+#[test]
+fn canary_candidate_must_differ_from_stable_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v1"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::CandidateMatchesStable,),
+    );
+}
+
+#[test]
+fn canary_replica_count_must_preserve_stable_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            2,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::InvalidReplicaCount {
+            desired_replicas: 2,
+            candidate_replicas: 2,
+        },),
+    );
+}
+
+#[test]
+fn canary_requires_healthy_stable_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryRequiresHealthyDeployment {
+            deployment_id: DeploymentId::new("deployment-01"),
+            status: DeploymentStatus::Pending,
+        },
+    );
+}
+
+#[test]
+fn canary_reconciliation_converges_to_requested_split() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-canary", "workload-v1"))
+        .unwrap();
+
+    let initial = state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert_eq!(initial.len(), 2);
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-canary"),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-canary"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let changed = state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert_eq!(changed.len(), 2);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-canary")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert_eq!(
+        active
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+            .count(),
+        1,
+    );
+
+    assert_eq!(
+        active
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v2") })
+            .count(),
+        1,
+    );
+
+    assert!(
+        active
+            .iter()
+            .all(|instance| { instance.status == InstanceStatus::Assigned })
+    );
+
+    let deployment = state
+        .deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert_eq!(deployment.workload_id, WorkloadId::new("workload-v1"));
+    assert_eq!(deployment.status, DeploymentStatus::Healthy);
+    assert!(deployment.canary.is_some());
+
+    let repeated = state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert!(repeated.is_empty());
+}
+
+#[test]
+fn canary_reconciliation_waits_while_candidate_is_pending() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut candidate = workload("workload-v2");
+    candidate.spec.resources = ResourceRequest::new(5_000, 67_108_864);
+
+    state.register_workload(candidate).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-canary", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-canary"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let first = state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert_eq!(first.len(), 2);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-canary")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert_eq!(
+        active
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+            .count(),
+        1,
+    );
+
+    let candidate = active
+        .iter()
+        .find(|instance| instance.workload_id == WorkloadId::new("workload-v2"))
+        .unwrap();
+
+    assert_eq!(candidate.status, InstanceStatus::Pending);
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-canary"),)
+            .unwrap()
+            .status,
+        DeploymentStatus::Progressing,
+    );
+
+    let second = state
+        .reconcile_deployment(&DeploymentId::new("deployment-canary"))
+        .unwrap();
+
+    assert!(second.is_empty());
+
+    let active_after_second = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-canary")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active_after_second.len(), 2);
+
+    assert_eq!(
+        active_after_second
+            .iter()
+            .filter(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn rollout_is_rejected_while_canary_is_active() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+    state.register_workload(workload("workload-v3")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let error = state
+        .rollout_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v3"),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryAlreadyActive(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn canary_scale_rejects_split_without_stable_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let error = state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 1)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::InvalidReplicaCount {
+            desired_replicas: 1,
+            candidate_replicas: 1,
+        },),
+    );
+
+    let deployment = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(deployment.desired_replicas, 2);
+    assert_eq!(deployment.generation, 2);
+}
+
+#[test]
+fn healthy_canary_can_be_promoted() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let promoted = state
+        .promote_canary_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(promoted.workload_id, WorkloadId::new("workload-v2"),);
+
+    assert_eq!(
+        promoted.previous_workload_id,
+        Some(WorkloadId::new("workload-v1")),
+    );
+
+    assert_eq!(promoted.generation, 3);
+    assert_eq!(promoted.status, DeploymentStatus::Progressing);
+    assert!(promoted.canary.is_none());
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert!(
+        active
+            .iter()
+            .all(|instance| { instance.workload_id == WorkloadId::new("workload-v2") })
+    );
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+}
+
+#[test]
+fn canary_promotion_requires_active_canary() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let error = state
+        .promote_canary_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryNotActive(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn canary_promotion_waits_for_candidate_availability() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut candidate = workload("workload-v2");
+    candidate.spec.resources = ResourceRequest::new(5_000, 67_108_864);
+
+    state.register_workload(candidate).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let error = state
+        .promote_canary_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryNotReady {
+            deployment_id: DeploymentId::new("deployment-01"),
+            status: DeploymentStatus::Progressing,
+        },
+    );
+}
+
+#[test]
+fn active_canary_can_be_rolled_back_to_stable_revision() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let rolled_back = state
+        .rollback_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(rolled_back.workload_id, WorkloadId::new("workload-v1"),);
+
+    assert_eq!(rolled_back.previous_workload_id, None);
+    assert_eq!(rolled_back.generation, 3);
+    assert_eq!(rolled_back.status, DeploymentStatus::Progressing,);
+    assert!(rolled_back.canary.is_none());
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert!(
+        active
+            .iter()
+            .all(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+    );
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+}
+
+#[test]
+fn promoted_revision_can_rollback_to_previous_workload() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .promote_canary_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let rolled_back = state
+        .rollback_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(rolled_back.workload_id, WorkloadId::new("workload-v1"),);
+
+    assert_eq!(
+        rolled_back.previous_workload_id,
+        Some(WorkloadId::new("workload-v2")),
+    );
+
+    assert_eq!(rolled_back.generation, 4);
+    assert_eq!(rolled_back.status, DeploymentStatus::Progressing,);
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert!(
+        active
+            .iter()
+            .all(|instance| { instance.workload_id == WorkloadId::new("workload-v1") })
+    );
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+}
+
+#[test]
+fn rollback_requires_previous_revision_or_active_canary() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let error = state
+        .rollback_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::RollbackUnavailable(DeploymentId::new("deployment-01"),),
     );
 }
 
