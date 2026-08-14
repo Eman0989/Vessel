@@ -1766,3 +1766,247 @@ async fn rollout_missing_deployment_returns_not_found_over_http() {
             .contains("deployment missing was not found")
     );
 }
+
+#[tokio::test]
+async fn rolling_deployment_converges_over_http() {
+    let app = test_app();
+
+    let body = serde_json::to_vec(&node("node-01")).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/nodes")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    for workload_id in ["workload-v1", "workload-v2"] {
+        let body = serde_json::to_vec(&workload(workload_id)).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/workloads")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let body = serde_json::to_vec(&deployment("deployment-rollout", "workload-v1")).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-rollout/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let initial = body_json(response).await;
+
+    assert_eq!(initial.as_array().unwrap().len(), 2);
+
+    assert!(initial.as_array().unwrap().iter().all(|instance| {
+        instance["workload_id"] == "workload-v1" && instance["status"] == "assigned"
+    }));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-rollout/rollout")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "workload_id": "workload-v2"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let rollout = body_json(response).await;
+
+    assert_eq!(rollout["workload_id"], "workload-v2");
+    assert_eq!(rollout["generation"], 2);
+    assert_eq!(rollout["status"], "progressing");
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-rollout/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let first = body_json(first).await;
+    let first = first.as_array().unwrap();
+
+    assert_eq!(first.len(), 2);
+
+    assert!(first.iter().any(|instance| {
+        instance["workload_id"] == "workload-v1" && instance["status"] == "cancelled"
+    }));
+
+    assert!(first.iter().any(|instance| {
+        instance["workload_id"] == "workload-v2" && instance["status"] == "assigned"
+    }));
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-rollout/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let second = body_json(second).await;
+    let second = second.as_array().unwrap();
+
+    assert_eq!(second.len(), 2);
+
+    assert!(second.iter().any(|instance| {
+        instance["workload_id"] == "workload-v1" && instance["status"] == "cancelled"
+    }));
+
+    assert!(second.iter().any(|instance| {
+        instance["workload_id"] == "workload-v2" && instance["status"] == "assigned"
+    }));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/instances")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let instances = body_json(response).await;
+    let instances = instances.as_array().unwrap();
+
+    let active = instances
+        .iter()
+        .filter(|instance| {
+            !matches!(
+                instance["status"].as_str(),
+                Some("succeeded" | "failed" | "lost" | "cancelled")
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 2);
+
+    assert!(active.iter().all(|instance| {
+        instance["workload_id"] == "workload-v2" && instance["status"] == "assigned"
+    }));
+
+    assert_eq!(
+        instances
+            .iter()
+            .filter(|instance| {
+                instance["workload_id"] == "workload-v1" && instance["status"] == "cancelled"
+            })
+            .count(),
+        2,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/deployments")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let deployments = body_json(response).await;
+    let deployment = deployments
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|deployment| deployment["id"] == "deployment-rollout")
+        .unwrap();
+
+    assert_eq!(deployment["workload_id"], "workload-v2",);
+    assert_eq!(deployment["generation"], 2);
+    assert_eq!(deployment["status"], "healthy");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-rollout/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let final_pass = body_json(response).await;
+
+    assert!(final_pass.as_array().unwrap().is_empty());
+}
