@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use vessel_control::{ControlError, ControlState};
 use vessel_core::{
-    ArtifactRef, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus,
-    Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload, WorkloadId,
-    WorkloadSpec, WorkloadStatus,
+    ArtifactRef, CanaryPlanError, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
+    InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
+    WorkloadId, WorkloadSpec, WorkloadStatus,
 };
 
 fn node(id: &str) -> Node {
@@ -403,6 +403,234 @@ fn deployment_rollout_requires_existing_deployment() {
     assert_eq!(
         error,
         ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment"))
+    );
+}
+
+#[test]
+fn deployment_can_begin_canary_to_registered_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    let updated = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(updated.workload_id, WorkloadId::new("workload-v1"),);
+
+    let plan = updated.canary.as_ref().unwrap();
+
+    assert_eq!(plan.stable_workload_id, WorkloadId::new("workload-v1"),);
+
+    assert_eq!(plan.candidate_workload_id, WorkloadId::new("workload-v2"),);
+
+    assert_eq!(plan.candidate_replicas, 1);
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.status, DeploymentStatus::Progressing);
+}
+
+#[test]
+fn repeated_identical_canary_request_is_idempotent() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let repeated = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(repeated.generation, 2);
+    assert_eq!(repeated.status, DeploymentStatus::Progressing);
+    assert!(repeated.canary.is_some());
+}
+
+#[test]
+fn conflicting_canary_request_is_rejected() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+    state.register_workload(workload("workload-v3")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v3"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryAlreadyActive(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn canary_requires_existing_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("missing-deployment"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::DeploymentNotFound(DeploymentId::new("missing-deployment"),),
+    );
+}
+
+#[test]
+fn canary_requires_registered_candidate_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("missing-workload"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::WorkloadNotFound(WorkloadId::new("missing-workload"),),
+    );
+}
+
+#[test]
+fn canary_candidate_must_differ_from_stable_workload() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v1"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::CandidateMatchesStable,),
+    );
+}
+
+#[test]
+fn canary_replica_count_must_preserve_stable_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    let mut stable = deployment("deployment-01", "workload-v1");
+    stable.status = DeploymentStatus::Healthy;
+
+    state.create_deployment(stable).unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            2,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::InvalidReplicaCount {
+            desired_replicas: 2,
+            candidate_replicas: 2,
+        },),
+    );
+}
+
+#[test]
+fn canary_requires_healthy_stable_deployment() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    let error = state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryRequiresHealthyDeployment {
+            deployment_id: DeploymentId::new("deployment-01"),
+            status: DeploymentStatus::Pending,
+        },
     );
 }
 

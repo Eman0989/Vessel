@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use vessel_core::{
-    Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus, Node, NodeId,
-    NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
+    CanaryPlan, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus,
+    Node, NodeId, NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
 use vessel_scheduler::{Scheduler, SchedulerError};
@@ -481,6 +481,58 @@ impl ControlState {
         }
 
         Ok(changed.into_values().collect())
+    }
+
+    pub fn begin_canary_deployment(
+        &mut self,
+        id: &DeploymentId,
+        candidate_workload_id: &WorkloadId,
+        candidate_replicas: u32,
+    ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if !self.workloads.contains_key(candidate_workload_id) {
+            return Err(ControlError::WorkloadNotFound(
+                candidate_workload_id.clone(),
+            ));
+        }
+
+        let plan = CanaryPlan::new(
+            current.workload_id.clone(),
+            candidate_workload_id.clone(),
+            current.desired_replicas,
+            candidate_replicas,
+        )?;
+
+        if let Some(active) = &current.canary {
+            if active == &plan {
+                return Ok(current);
+            }
+
+            return Err(ControlError::CanaryAlreadyActive(id.clone()));
+        }
+
+        if current.status != DeploymentStatus::Healthy {
+            return Err(ControlError::CanaryRequiresHealthyDeployment {
+                deployment_id: id.clone(),
+                status: current.status,
+            });
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.canary = Some(plan);
+        deployment.generation += 1;
+        deployment.status = DeploymentStatus::Progressing;
+
+        Ok(deployment.clone())
     }
 
     pub fn rollout_deployment(

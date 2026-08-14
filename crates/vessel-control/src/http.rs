@@ -157,7 +157,9 @@ fn control_error_response(error: ControlError) -> ApiError {
         ControlError::NodeAlreadyExists(_)
         | ControlError::WorkloadAlreadyExists(_)
         | ControlError::DeploymentAlreadyExists(_)
-        | ControlError::InstanceAlreadyExists(_) => StatusCode::CONFLICT,
+        | ControlError::InstanceAlreadyExists(_)
+        | ControlError::CanaryAlreadyActive(_)
+        | ControlError::CanaryRequiresHealthyDeployment { .. } => StatusCode::CONFLICT,
 
         ControlError::NodeNotFound(_)
         | ControlError::WorkloadNotFound(_)
@@ -166,6 +168,7 @@ fn control_error_response(error: ControlError) -> ApiError {
 
         ControlError::InstanceWorkloadMismatch { .. }
         | ControlError::InstanceAssignmentRequiresNode(_)
+        | ControlError::CanaryPlan(_)
         | ControlError::Core(_) => StatusCode::UNPROCESSABLE_ENTITY,
 
         ControlError::Scheduler(_) => StatusCode::SERVICE_UNAVAILABLE,

@@ -1,5 +1,7 @@
 use thiserror::Error;
-use vessel_core::{CoreError, DeploymentId, InstanceId, NodeId, WorkloadId};
+use vessel_core::{
+    CanaryPlanError, CoreError, DeploymentId, DeploymentStatus, InstanceId, NodeId, WorkloadId,
+};
 use vessel_scheduler::SchedulerError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -27,6 +29,20 @@ pub enum ControlError {
 
     #[error("instance {0} was not found")]
     InstanceNotFound(InstanceId),
+
+    #[error("deployment {0} already has an active canary")]
+    CanaryAlreadyActive(DeploymentId),
+
+    #[error(
+        "deployment {deployment_id} must be healthy before starting a canary; current status is {status:?}"
+    )]
+    CanaryRequiresHealthyDeployment {
+        deployment_id: DeploymentId,
+        status: DeploymentStatus,
+    },
+
+    #[error(transparent)]
+    CanaryPlan(#[from] CanaryPlanError),
 
     #[error(
         "instance {instance_id} workload {instance_workload_id} does not match deployment workload {deployment_workload_id}"
