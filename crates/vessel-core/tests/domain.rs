@@ -81,6 +81,7 @@ fn deployment_scaling_increments_generation() {
         desired_replicas: 3,
         generation: 1,
         status: DeploymentStatus::Healthy,
+        previous_workload_id: None,
         canary: None,
     };
 

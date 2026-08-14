@@ -436,6 +436,7 @@ mod tests {
             desired_replicas: 1,
             generation: 2,
             status: DeploymentStatus::Progressing,
+            previous_workload_id: Some(WorkloadId::new("workload-v1")),
             canary: None,
         };
 

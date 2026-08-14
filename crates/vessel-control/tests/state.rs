@@ -43,6 +43,7 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         desired_replicas: 2,
         generation: 1,
         status: DeploymentStatus::Pending,
+        previous_workload_id: None,
         canary: None,
     }
 }

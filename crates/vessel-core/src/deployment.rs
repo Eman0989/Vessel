@@ -84,6 +84,9 @@ pub struct Deployment {
     pub status: DeploymentStatus,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_workload_id: Option<WorkloadId>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary: Option<CanaryPlan>,
 }
 
@@ -103,7 +106,9 @@ impl Deployment {
     /// during a rolling deployment.
     pub fn rollout_to(&mut self, workload_id: WorkloadId) {
         if self.workload_id != workload_id {
-            self.workload_id = workload_id;
+            let previous = std::mem::replace(&mut self.workload_id, workload_id);
+
+            self.previous_workload_id = Some(previous);
             self.generation += 1;
             self.status = DeploymentStatus::Progressing;
         }
@@ -125,6 +130,7 @@ mod tests {
             desired_replicas: 3,
             generation: 1,
             status: DeploymentStatus::Healthy,
+            previous_workload_id: None,
             canary: None,
         }
     }
@@ -222,6 +228,7 @@ mod tests {
 
         let deployment: Deployment = serde_json::from_value(value).unwrap();
 
+        assert_eq!(deployment.previous_workload_id, None);
         assert_eq!(deployment.canary, None);
     }
 
@@ -254,6 +261,11 @@ mod tests {
 
         assert_eq!(deployment.workload_id, WorkloadId::new("workload-v2"));
 
+        assert_eq!(
+            deployment.previous_workload_id,
+            Some(WorkloadId::new("workload-v1")),
+        );
+
         assert_eq!(deployment.generation, 2);
         assert_eq!(deployment.status, DeploymentStatus::Progressing);
     }
@@ -265,9 +277,45 @@ mod tests {
         deployment.rollout_to(WorkloadId::new("workload-v1"));
 
         assert_eq!(deployment.workload_id, WorkloadId::new("workload-v1"));
+        assert_eq!(deployment.previous_workload_id, None);
 
         assert_eq!(deployment.generation, 1);
         assert_eq!(deployment.status, DeploymentStatus::Healthy);
+    }
+
+    #[test]
+    fn successive_rollouts_retain_immediate_previous_revision() {
+        let mut deployment = deployment();
+
+        deployment.rollout_to(WorkloadId::new("workload-v2"));
+        deployment.rollout_to(WorkloadId::new("workload-v3"));
+
+        assert_eq!(deployment.workload_id, WorkloadId::new("workload-v3"),);
+
+        assert_eq!(
+            deployment.previous_workload_id,
+            Some(WorkloadId::new("workload-v2")),
+        );
+
+        assert_eq!(deployment.generation, 3);
+    }
+
+    #[test]
+    fn previous_workload_revision_round_trips_through_json() {
+        let mut deployment = deployment();
+
+        deployment.rollout_to(WorkloadId::new("workload-v2"));
+
+        let json = serde_json::to_string(&deployment).unwrap();
+
+        let restored: Deployment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            restored.previous_workload_id,
+            Some(WorkloadId::new("workload-v1")),
+        );
+
+        assert_eq!(restored, deployment);
     }
 
     #[test]
