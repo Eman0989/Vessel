@@ -1012,6 +1012,11 @@ impl ControlState {
 
         self.apply_deployment_scale(id, decision.desired_replicas)?;
 
+        // Autoscaling owns the desired replica target while
+        // deployment reconciliation owns convergence of the
+        // actual instance set toward that target.
+        self.reconcile_deployment(id)?;
+
         Ok(decision)
     }
 

@@ -582,6 +582,198 @@ fn autoscaling_evaluation_applies_replica_decision() {
 }
 
 #[test]
+fn autoscaling_evaluation_reconciles_scale_up() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 50).unwrap(),
+        )
+        .unwrap();
+
+    let decision = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 100)
+        .unwrap();
+
+    assert_eq!(decision.current_replicas, 2);
+    assert_eq!(decision.desired_replicas, 4);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .count();
+
+    assert_eq!(active, 4);
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.desired_replicas, 4);
+    assert_eq!(stored.status, DeploymentStatus::Healthy);
+}
+
+#[test]
+fn autoscaling_evaluation_reconciles_scale_down() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 4)
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 50).unwrap(),
+        )
+        .unwrap();
+
+    let decision = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 25)
+        .unwrap();
+
+    assert_eq!(decision.current_replicas, 4);
+    assert_eq!(decision.desired_replicas, 2);
+
+    let instances = state.list_instances();
+
+    let active = instances
+        .iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .count();
+
+    let cancelled = instances
+        .iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && instance.status == InstanceStatus::Cancelled
+        })
+        .count();
+
+    assert_eq!(active, 2);
+    assert_eq!(cancelled, 2);
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.desired_replicas, 2);
+    assert_eq!(stored.status, DeploymentStatus::Healthy);
+}
+
+#[test]
+fn autoscaling_reconciliation_preserves_canary_split() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-01")).unwrap();
+    state.register_workload(workload("workload-v1")).unwrap();
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-v1"))
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    state
+        .reconcile_deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(2, 5, 50).unwrap(),
+        )
+        .unwrap();
+
+    let decision = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 100)
+        .unwrap();
+
+    assert_eq!(decision.desired_replicas, 4);
+
+    let active = state
+        .list_instances()
+        .into_iter()
+        .filter(|instance| {
+            instance.deployment_id == DeploymentId::new("deployment-01")
+                && !instance.status.is_terminal()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(active.len(), 4);
+
+    let stable = active
+        .iter()
+        .filter(|instance| instance.workload_id == WorkloadId::new("workload-v1"))
+        .count();
+
+    let candidate = active
+        .iter()
+        .filter(|instance| instance.workload_id == WorkloadId::new("workload-v2"))
+        .count();
+
+    assert_eq!(stable, 3);
+    assert_eq!(candidate, 1);
+
+    assert_eq!(
+        state
+            .deployment(&DeploymentId::new("deployment-01"))
+            .unwrap()
+            .status,
+        DeploymentStatus::Healthy,
+    );
+}
+
+#[test]
 fn autoscaling_evaluation_rejects_invalid_observation() {
     let mut state = ControlState::new();
 
