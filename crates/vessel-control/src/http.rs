@@ -11,9 +11,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use vessel_core::{
-    Deployment, DeploymentId, ExecutionRequest, ExecutionResult, Instance, InstanceId,
-    InstanceStatus, Node, NodeId, NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload,
-    WorkloadId,
+    AutoscalingDecision, AutoscalingPolicy, Deployment, DeploymentId, ExecutionRequest,
+    ExecutionResult, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
+    WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
 
 use crate::{ControlError, ControlState};
@@ -86,6 +86,18 @@ pub struct ScaleDeploymentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EnableAutoscalingRequest {
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+    pub target_cpu_utilization_percent: u8,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EvaluateAutoscalingRequest {
+    pub observed_cpu_utilization_percent: u8,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RolloutDeploymentRequest {
     pub workload_id: WorkloadId,
 }
@@ -136,6 +148,18 @@ pub fn shared_router_with_network_config(
             get(list_deployments).post(create_deployment),
         )
         .route("/v1/deployments/{id}/scale", post(scale_deployment))
+        .route(
+            "/v1/deployments/{id}/autoscaling",
+            post(enable_deployment_autoscaling),
+        )
+        .route(
+            "/v1/deployments/{id}/autoscaling/disable",
+            post(disable_deployment_autoscaling),
+        )
+        .route(
+            "/v1/deployments/{id}/autoscaling/evaluate",
+            post(evaluate_deployment_autoscaling),
+        )
         .route("/v1/deployments/{id}/rollout", post(rollout_deployment))
         .route("/v1/deployments/{id}/canary", post(begin_canary_deployment))
         .route(
@@ -315,6 +339,50 @@ async fn scale_deployment(
         .map_err(control_error_response)?;
 
     Ok(Json(deployment))
+}
+
+async fn enable_deployment_autoscaling(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(request): Json<EnableAutoscalingRequest>,
+) -> Result<Json<Deployment>, ApiError> {
+    let policy = AutoscalingPolicy {
+        min_replicas: request.min_replicas,
+        max_replicas: request.max_replicas,
+        target_cpu_utilization_percent: request.target_cpu_utilization_percent,
+    };
+
+    let deployment = lock_state(&state)?
+        .enable_deployment_autoscaling(&DeploymentId::new(id), policy)
+        .map_err(control_error_response)?;
+
+    Ok(Json(deployment))
+}
+
+async fn disable_deployment_autoscaling(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Deployment>, ApiError> {
+    let deployment = lock_state(&state)?
+        .disable_deployment_autoscaling(&DeploymentId::new(id))
+        .map_err(control_error_response)?;
+
+    Ok(Json(deployment))
+}
+
+async fn evaluate_deployment_autoscaling(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(request): Json<EvaluateAutoscalingRequest>,
+) -> Result<Json<AutoscalingDecision>, ApiError> {
+    let decision = lock_state(&state)?
+        .evaluate_deployment_autoscaling(
+            &DeploymentId::new(id),
+            request.observed_cpu_utilization_percent,
+        )
+        .map_err(control_error_response)?;
+
+    Ok(Json(decision))
 }
 
 async fn begin_canary_deployment(
