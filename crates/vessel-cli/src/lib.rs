@@ -144,6 +144,12 @@ pub enum DeploymentCommand {
         replicas: u32,
     },
 
+    /// Manage deployment autoscaling.
+    Autoscaling {
+        #[command(subcommand)]
+        command: AutoscalingCommand,
+    },
+
     /// Start a bounded canary deployment.
     Canary {
         /// Deployment identifier.
@@ -174,6 +180,43 @@ pub enum DeploymentCommand {
     Reconcile {
         /// Deployment identifier.
         id: String,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum AutoscalingCommand {
+    /// Enable or update autoscaling for a deployment.
+    Enable {
+        /// Deployment identifier.
+        id: String,
+
+        /// Minimum replica count.
+        #[arg(long)]
+        min_replicas: u32,
+
+        /// Maximum replica count.
+        #[arg(long)]
+        max_replicas: u32,
+
+        /// Target CPU utilization percentage.
+        #[arg(long = "target-cpu")]
+        target_cpu_utilization_percent: u8,
+    },
+
+    /// Disable autoscaling for a deployment.
+    Disable {
+        /// Deployment identifier.
+        id: String,
+    },
+
+    /// Evaluate autoscaling using an observed CPU sample.
+    Evaluate {
+        /// Deployment identifier.
+        id: String,
+
+        /// Observed CPU utilization percentage.
+        #[arg(long = "observed-cpu")]
+        observed_cpu_utilization_percent: u8,
     },
 }
 
@@ -626,6 +669,64 @@ pub async fn execute(cli: Cli) -> Result<String, CliError> {
 
             client
                 .post(&format!("/v1/deployments/{id}/scale"), Some(&body))
+                .await?
+        }
+
+        Command::Deployment {
+            command:
+                DeploymentCommand::Autoscaling {
+                    command:
+                        AutoscalingCommand::Enable {
+                            id,
+                            min_replicas,
+                            max_replicas,
+                            target_cpu_utilization_percent,
+                        },
+                },
+        } => {
+            let body = json!({
+                "min_replicas": min_replicas,
+                "max_replicas": max_replicas,
+                "target_cpu_utilization_percent":
+                    target_cpu_utilization_percent
+            });
+
+            client
+                .post(&format!("/v1/deployments/{id}/autoscaling"), Some(&body))
+                .await?
+        }
+
+        Command::Deployment {
+            command:
+                DeploymentCommand::Autoscaling {
+                    command: AutoscalingCommand::Disable { id },
+                },
+        } => {
+            client
+                .post(&format!("/v1/deployments/{id}/autoscaling/disable"), None)
+                .await?
+        }
+
+        Command::Deployment {
+            command:
+                DeploymentCommand::Autoscaling {
+                    command:
+                        AutoscalingCommand::Evaluate {
+                            id,
+                            observed_cpu_utilization_percent,
+                        },
+                },
+        } => {
+            let body = json!({
+                "observed_cpu_utilization_percent":
+                    observed_cpu_utilization_percent
+            });
+
+            client
+                .post(
+                    &format!("/v1/deployments/{id}/autoscaling/evaluate"),
+                    Some(&body),
+                )
                 .await?
         }
 
