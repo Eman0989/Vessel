@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use vessel_control::{ControlError, ControlState};
 use vessel_core::{
-    ArtifactRef, AutoscalingPolicy, CanaryPlanError, Deployment, DeploymentId, DeploymentStatus,
-    Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity,
-    ResourceRequest, Workload, WorkloadId, WorkloadSpec, WorkloadStatus,
+    ArtifactRef, AutoscalingDecisionError, AutoscalingPolicy, AutoscalingPolicyError,
+    CanaryPlanError, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId,
+    InstanceStatus, Node, NodeId, NodeStatus, ResourceCapacity, ResourceRequest, Workload,
+    WorkloadId, WorkloadSpec, WorkloadStatus,
 };
 
 fn node(id: &str) -> Node {
@@ -368,6 +369,288 @@ fn scaling_to_same_replica_count_preserves_generation() {
     assert_eq!(updated.generation, 1);
 
     assert_eq!(updated.status, DeploymentStatus::Pending,);
+}
+
+#[test]
+fn deployment_autoscaling_can_be_enabled() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let policy = AutoscalingPolicy::new(1, 5, 70).unwrap();
+
+    let updated = state
+        .enable_deployment_autoscaling(&DeploymentId::new("deployment-01"), policy.clone())
+        .unwrap();
+
+    assert_eq!(updated.autoscaling, Some(policy));
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.status, DeploymentStatus::Pending,);
+}
+
+#[test]
+fn repeated_autoscaling_enable_is_idempotent() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let policy = AutoscalingPolicy::new(1, 5, 70).unwrap();
+
+    state
+        .enable_deployment_autoscaling(&DeploymentId::new("deployment-01"), policy.clone())
+        .unwrap();
+
+    let repeated = state
+        .enable_deployment_autoscaling(&DeploymentId::new("deployment-01"), policy)
+        .unwrap();
+
+    assert_eq!(repeated.generation, 2);
+}
+
+#[test]
+fn deployment_autoscaling_can_be_disabled_idempotently() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 70).unwrap(),
+        )
+        .unwrap();
+
+    let disabled = state
+        .disable_deployment_autoscaling(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(disabled.autoscaling, None);
+    assert_eq!(disabled.generation, 3);
+
+    let repeated = state
+        .disable_deployment_autoscaling(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(repeated.generation, 3);
+}
+
+#[test]
+fn autoscaling_policy_must_include_current_replica_count() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(3, 5, 70).unwrap(),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::AutoscalingReplicaBounds {
+            deployment_id: DeploymentId::new("deployment-01"),
+            desired_replicas: 2,
+            min_replicas: 3,
+            max_replicas: 5,
+        },
+    );
+}
+
+#[test]
+fn autoscaling_enable_revalidates_raw_policy() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy {
+                min_replicas: 0,
+                max_replicas: 5,
+                target_cpu_utilization_percent: 70,
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::AutoscalingPolicy(AutoscalingPolicyError::MinimumReplicasMustBePositive,),
+    );
+}
+
+#[test]
+fn manual_scaling_is_rejected_while_autoscaling_is_enabled() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 70).unwrap(),
+        )
+        .unwrap();
+
+    let error = state
+        .scale_deployment(&DeploymentId::new("deployment-01"), 4)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::AutoscalingControlsReplicas(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn autoscaling_evaluation_requires_enabled_policy() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    let error = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 80)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::AutoscalingNotEnabled(DeploymentId::new("deployment-01"),),
+    );
+}
+
+#[test]
+fn autoscaling_evaluation_applies_replica_decision() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 50).unwrap(),
+        )
+        .unwrap();
+
+    let decision = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 100)
+        .unwrap();
+
+    assert_eq!(decision.current_replicas, 2);
+    assert_eq!(decision.desired_replicas, 4);
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.desired_replicas, 4);
+    assert_eq!(stored.generation, 3);
+    assert_eq!(stored.status, DeploymentStatus::Progressing,);
+}
+
+#[test]
+fn autoscaling_evaluation_rejects_invalid_observation() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-01")).unwrap();
+
+    state
+        .create_deployment(deployment("deployment-01", "workload-01"))
+        .unwrap();
+
+    state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 70).unwrap(),
+        )
+        .unwrap();
+
+    let error = state
+        .evaluate_deployment_autoscaling(&DeploymentId::new("deployment-01"), 101)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::AutoscalingDecision(
+            AutoscalingDecisionError::InvalidObservedCpuUtilization {
+                observed_percent: 101,
+            },
+        ),
+    );
+
+    let stored = state
+        .deployment(&DeploymentId::new("deployment-01"))
+        .unwrap();
+
+    assert_eq!(stored.desired_replicas, 2);
+    assert_eq!(stored.generation, 2);
+}
+
+#[test]
+fn autoscaling_policy_preserves_active_canary_capacity() {
+    let mut state = ControlState::new();
+
+    state.register_workload(workload("workload-v1")).unwrap();
+
+    state.register_workload(workload("workload-v2")).unwrap();
+
+    create_healthy_deployment(&mut state, "deployment-01", "workload-v1");
+
+    state
+        .begin_canary_deployment(
+            &DeploymentId::new("deployment-01"),
+            &WorkloadId::new("workload-v2"),
+            1,
+        )
+        .unwrap();
+
+    let error = state
+        .enable_deployment_autoscaling(
+            &DeploymentId::new("deployment-01"),
+            AutoscalingPolicy::new(1, 5, 70).unwrap(),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        ControlError::CanaryPlan(CanaryPlanError::InvalidReplicaCount {
+            desired_replicas: 1,
+            candidate_replicas: 1,
+        },),
+    );
 }
 
 #[test]

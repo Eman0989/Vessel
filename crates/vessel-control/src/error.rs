@@ -1,6 +1,7 @@
 use thiserror::Error;
 use vessel_core::{
-    CanaryPlanError, CoreError, DeploymentId, DeploymentStatus, InstanceId, NodeId, WorkloadId,
+    AutoscalingDecisionError, AutoscalingPolicyError, CanaryPlanError, CoreError, DeploymentId,
+    DeploymentStatus, InstanceId, NodeId, WorkloadId,
 };
 use vessel_scheduler::SchedulerError;
 
@@ -19,6 +20,28 @@ pub enum ControlError {
         "deployment {0} must start at generation 1 in pending state without rollback history, an active canary, or an autoscaling policy"
     )]
     InvalidDeploymentInitialState(DeploymentId),
+
+    #[error("deployment {0} has autoscaling enabled; disable autoscaling before manual scaling")]
+    AutoscalingControlsReplicas(DeploymentId),
+
+    #[error("deployment {0} does not have autoscaling enabled")]
+    AutoscalingNotEnabled(DeploymentId),
+
+    #[error(
+        "deployment {deployment_id} desired replicas {desired_replicas} are outside autoscaling bounds {min_replicas}..={max_replicas}"
+    )]
+    AutoscalingReplicaBounds {
+        deployment_id: DeploymentId,
+        desired_replicas: u32,
+        min_replicas: u32,
+        max_replicas: u32,
+    },
+
+    #[error(transparent)]
+    AutoscalingPolicy(#[from] AutoscalingPolicyError),
+
+    #[error(transparent)]
+    AutoscalingDecision(#[from] AutoscalingDecisionError),
 
     #[error("instance {0} already exists")]
     InstanceAlreadyExists(InstanceId),
