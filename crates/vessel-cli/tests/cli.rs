@@ -210,6 +210,168 @@ async fn deployment_scale_posts_replica_contract() {
 }
 
 #[tokio::test]
+async fn deployment_autoscaling_enable_posts_policy_contract() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/autoscaling",
+        post(
+            |Path(id): Path<String>, Json(payload): Json<Value>| async move {
+                Json(json!({
+                    "id": id,
+                    "desired_replicas": 2,
+                    "generation": 2,
+                    "status": "healthy",
+                    "autoscaling": payload
+                }))
+            },
+        ),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "autoscaling",
+        "enable",
+        "deployment-01",
+        "--min-replicas",
+        "1",
+        "--max-replicas",
+        "6",
+        "--target-cpu",
+        "70",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["id"], "deployment-01");
+
+    assert_eq!(value["autoscaling"]["min_replicas"], 1,);
+
+    assert_eq!(value["autoscaling"]["max_replicas"], 6,);
+
+    assert_eq!(value["autoscaling"]["target_cpu_utilization_percent"], 70,);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn deployment_autoscaling_disable_posts_without_payload() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/autoscaling/disable",
+        post(|Path(id): Path<String>| async move {
+            Json(json!({
+                "id": id,
+                "desired_replicas": 4,
+                "generation": 4,
+                "status": "healthy",
+                "autoscaling": null
+            }))
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "autoscaling",
+        "disable",
+        "deployment-01",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["id"], "deployment-01");
+    assert!(value["autoscaling"].is_null());
+    assert_eq!(value["desired_replicas"], 4);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn deployment_autoscaling_evaluate_posts_cpu_sample() {
+    let app = Router::new().route(
+        "/v1/deployments/{id}/autoscaling/evaluate",
+        post(
+            |Path(_id): Path<String>, Json(payload): Json<Value>| async move {
+                Json(json!({
+                    "current_replicas": 2,
+                    "desired_replicas": 3,
+                    "observed_cpu_utilization_percent":
+                        payload[
+                            "observed_cpu_utilization_percent"
+                        ],
+                    "target_cpu_utilization_percent": 70,
+                    "direction": "scale_up"
+                }))
+            },
+        ),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let address = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let control_url = format!("http://{address}");
+
+    let cli = Cli::try_parse_from([
+        "vessel",
+        "--control-url",
+        &control_url,
+        "deployment",
+        "autoscaling",
+        "evaluate",
+        "deployment-01",
+        "--observed-cpu",
+        "85",
+    ])
+    .unwrap();
+
+    let output = execute(cli).await.unwrap();
+    let value: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(value["current_replicas"], 2);
+    assert_eq!(value["desired_replicas"], 3);
+
+    assert_eq!(value["observed_cpu_utilization_percent"], 85,);
+
+    assert_eq!(value["target_cpu_utilization_percent"], 70,);
+
+    assert_eq!(value["direction"], "scale_up");
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn deployment_canary_posts_candidate_contract() {
     let app = Router::new().route(
         "/v1/deployments/{id}/canary",

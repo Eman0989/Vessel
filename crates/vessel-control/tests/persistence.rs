@@ -45,6 +45,7 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         status: DeploymentStatus::Pending,
         previous_workload_id: None,
         canary: None,
+        autoscaling: None,
     }
 }
 

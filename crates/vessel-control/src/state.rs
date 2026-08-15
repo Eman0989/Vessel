@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use vessel_core::{
-    CanaryPlan, Deployment, DeploymentId, DeploymentStatus, Instance, InstanceId, InstanceStatus,
-    Node, NodeId, NodeStatus, WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
+    AutoscalingDecision, AutoscalingPolicy, CanaryPlan, Deployment, DeploymentId, DeploymentStatus,
+    Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus, WorkerHeartbeat,
+    WorkerRegistration, Workload, WorkloadId,
 };
 
 use vessel_scheduler::{Scheduler, SchedulerError};
@@ -155,6 +156,7 @@ impl ControlState {
             || deployment.status != DeploymentStatus::Pending
             || deployment.previous_workload_id.is_some()
             || deployment.canary.is_some()
+            || deployment.autoscaling.is_some()
         {
             return Err(ControlError::InvalidDeploymentInitialState(
                 deployment.id.clone(),
@@ -915,7 +917,128 @@ impl ControlState {
         Ok(deployment.clone())
     }
 
+    pub fn enable_deployment_autoscaling(
+        &mut self,
+        id: &DeploymentId,
+        policy: AutoscalingPolicy,
+    ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        // Reconstruct through the validated constructor because
+        // serde and public fields can otherwise create a policy
+        // without calling AutoscalingPolicy::new.
+        let policy = AutoscalingPolicy::new(
+            policy.min_replicas,
+            policy.max_replicas,
+            policy.target_cpu_utilization_percent,
+        )?;
+
+        if !policy.contains_replicas(current.desired_replicas) {
+            return Err(ControlError::AutoscalingReplicaBounds {
+                deployment_id: id.clone(),
+                desired_replicas: current.desired_replicas,
+                min_replicas: policy.min_replicas,
+                max_replicas: policy.max_replicas,
+            });
+        }
+
+        // If a canary is active, every replica target the
+        // autoscaler can choose must retain stable capacity.
+        if let Some(canary) = &current.canary {
+            canary.stable_replicas(policy.min_replicas)?;
+        }
+
+        if current.autoscaling.as_ref() == Some(&policy) {
+            return Ok(current);
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.autoscaling = Some(policy);
+        deployment.generation += 1;
+
+        Ok(deployment.clone())
+    }
+
+    pub fn disable_deployment_autoscaling(
+        &mut self,
+        id: &DeploymentId,
+    ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if current.autoscaling.is_none() {
+            return Ok(current);
+        }
+
+        let deployment = self
+            .deployments
+            .get_mut(id)
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        deployment.autoscaling = None;
+        deployment.generation += 1;
+
+        Ok(deployment.clone())
+    }
+
+    pub fn evaluate_deployment_autoscaling(
+        &mut self,
+        id: &DeploymentId,
+        observed_cpu_utilization_percent: u8,
+    ) -> Result<AutoscalingDecision, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        let policy = current
+            .autoscaling
+            .clone()
+            .ok_or_else(|| ControlError::AutoscalingNotEnabled(id.clone()))?;
+
+        let decision = policy.decide(current.desired_replicas, observed_cpu_utilization_percent)?;
+
+        self.apply_deployment_scale(id, decision.desired_replicas)?;
+
+        // Autoscaling owns the desired replica target while
+        // deployment reconciliation owns convergence of the
+        // actual instance set toward that target.
+        self.reconcile_deployment(id)?;
+
+        Ok(decision)
+    }
+
     pub fn scale_deployment(
+        &mut self,
+        id: &DeploymentId,
+        replicas: u32,
+    ) -> Result<Deployment, ControlError> {
+        let current = self
+            .deployments
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ControlError::DeploymentNotFound(id.clone()))?;
+
+        if current.autoscaling.is_some() {
+            return Err(ControlError::AutoscalingControlsReplicas(id.clone()));
+        }
+
+        self.apply_deployment_scale(id, replicas)
+    }
+
+    fn apply_deployment_scale(
         &mut self,
         id: &DeploymentId,
         replicas: u32,

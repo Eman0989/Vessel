@@ -58,6 +58,7 @@ fn deployment(id: &str, workload_id: &str) -> Deployment {
         status: DeploymentStatus::Pending,
         previous_workload_id: None,
         canary: None,
+        autoscaling: None,
     }
 }
 
@@ -285,6 +286,62 @@ async fn deployment_creation_rejects_preloaded_canary_state() {
 }
 
 #[tokio::test]
+async fn deployment_creation_rejects_preloaded_autoscaling_policy_over_http() {
+    let app = test_app();
+
+    let workload_body = serde_json::to_vec(&workload("workload-v1")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "deployment-autoscaling",
+                        "workload_id": "workload-v1",
+                        "desired_replicas": 2,
+                        "generation": 1,
+                        "status": "pending",
+                        "autoscaling": {
+                            "min_replicas": 1,
+                            "max_replicas": 4,
+                            "target_cpu_utilization_percent": 70
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("autoscaling policy"),
+    );
+}
+
+#[tokio::test]
 async fn deployment_can_be_created_and_scaled() {
     let app = test_app();
 
@@ -345,6 +402,475 @@ async fn deployment_can_be_created_and_scaled() {
     assert_eq!(json["generation"], 2,);
 
     assert_eq!(json["status"], "progressing",);
+}
+
+#[tokio::test]
+async fn autoscaling_lifecycle_completes_over_http() {
+    let app = test_app();
+
+    let node_body = serde_json::to_vec(&node("node-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/nodes")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(node_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let workload_body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let deployment_body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(deployment_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/reconcile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "min_replicas": 1,
+                        "max_replicas": 5,
+                        "target_cpu_utilization_percent": 50
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["generation"], 2);
+    assert_eq!(json["autoscaling"]["min_replicas"], 1,);
+    assert_eq!(json["autoscaling"]["max_replicas"], 5,);
+    assert_eq!(json["autoscaling"]["target_cpu_utilization_percent"], 50,);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling/evaluate")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "observed_cpu_utilization_percent": 100
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["current_replicas"], 2);
+    assert_eq!(json["desired_replicas"], 4);
+    assert_eq!(json["observed_cpu_utilization_percent"], 100,);
+    assert_eq!(json["target_cpu_utilization_percent"], 50,);
+    assert_eq!(json["direction"], "scale_up");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/deployments")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json[0]["desired_replicas"], 4);
+    assert_eq!(json[0]["generation"], 3);
+    assert_eq!(json[0]["status"], "healthy");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/instances")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    let active = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|instance| {
+            !matches!(
+                instance["status"].as_str().unwrap(),
+                "succeeded" | "failed" | "lost" | "cancelled"
+            )
+        })
+        .count();
+
+    assert_eq!(active, 4);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling/disable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["generation"], 4);
+    assert!(json["autoscaling"].is_null());
+    assert_eq!(json["desired_replicas"], 4);
+    assert_eq!(json["status"], "healthy");
+}
+
+#[tokio::test]
+async fn manual_scale_conflicts_with_autoscaling_over_http() {
+    let app = test_app();
+
+    let workload_body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let deployment_body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(deployment_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "min_replicas": 1,
+                        "max_replicas": 5,
+                        "target_cpu_utilization_percent": 70
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/scale")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "replicas": 4
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("disable autoscaling before manual scaling"),
+    );
+}
+
+#[tokio::test]
+async fn invalid_autoscaling_policies_are_rejected_over_http() {
+    let app = test_app();
+
+    let workload_body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let deployment_body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(deployment_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "min_replicas": 0,
+                        "max_replicas": 5,
+                        "target_cpu_utilization_percent": 70
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("minimum replicas must be at least 1"),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "min_replicas": 3,
+                        "max_replicas": 5,
+                        "target_cpu_utilization_percent": 70
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside autoscaling bounds 3..=5"),
+    );
+}
+
+#[tokio::test]
+async fn autoscaling_evaluation_http_errors_are_mapped() {
+    let app = test_app();
+
+    let workload_body = serde_json::to_vec(&workload("workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workloads")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(workload_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let deployment_body = serde_json::to_vec(&deployment("deployment-01", "workload-01")).unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(deployment_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling/evaluate")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "observed_cpu_utilization_percent": 80
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not have autoscaling enabled"),
+    );
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "min_replicas": 1,
+                        "max_replicas": 5,
+                        "target_cpu_utilization_percent": 70
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/deployments/deployment-01/autoscaling/evaluate")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "observed_cpu_utilization_percent": 101
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,);
+
+    let json = body_json(response).await;
+
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("observed CPU utilization must be between 0 and 100"),
+    );
 }
 
 #[tokio::test]
