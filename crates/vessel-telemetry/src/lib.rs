@@ -6,6 +6,7 @@ use tracing_subscriber::{
 use vessel_core::{Deployment, DeploymentStatus, Instance, InstanceStatus, Node, NodeStatus};
 
 pub const DEFAULT_LOG_FILTER: &str = "info";
+pub const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// Install VESSEL's process-wide structured tracing subscriber.
 ///
@@ -95,6 +96,120 @@ pub struct ResourceMetrics {
 }
 
 impl ClusterMetrics {
+    pub fn encode_prometheus(&self) -> String {
+        let mut output = String::new();
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_node_count",
+            "Number of VESSEL worker nodes by state.",
+            &[
+                ("all", self.nodes.total),
+                ("joining", self.nodes.joining),
+                ("ready", self.nodes.ready),
+                ("draining", self.nodes.draining),
+                ("unreachable", self.nodes.unreachable),
+            ],
+        );
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_deployment_count",
+            "Number of VESSEL deployments by state.",
+            &[
+                ("all", self.deployments.total),
+                ("pending", self.deployments.pending),
+                ("progressing", self.deployments.progressing),
+                ("healthy", self.deployments.healthy),
+                ("degraded", self.deployments.degraded),
+                ("failed", self.deployments.failed),
+                ("stopped", self.deployments.stopped),
+            ],
+        );
+
+        push_gauge(
+            &mut output,
+            "vessel_cluster_deployment_desired_replicas",
+            "Total desired replicas across VESSEL deployments.",
+            self.deployments.desired_replicas,
+        );
+
+        push_gauge(
+            &mut output,
+            "vessel_cluster_deployment_autoscaling_count",
+            "Number of VESSEL deployments with autoscaling enabled.",
+            self.deployments.autoscaling_enabled,
+        );
+
+        push_gauge(
+            &mut output,
+            "vessel_cluster_deployment_canary_count",
+            "Number of VESSEL deployments with an active canary.",
+            self.deployments.canary_active,
+        );
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_instance_count",
+            "Number of VESSEL workload instances by state.",
+            &[
+                ("all", self.instances.total),
+                ("active", self.instances.active),
+                ("pending", self.instances.pending),
+                ("assigned", self.instances.assigned),
+                ("starting", self.instances.starting),
+                ("running", self.instances.running),
+                ("stopping", self.instances.stopping),
+                ("succeeded", self.instances.succeeded),
+                ("failed", self.instances.failed),
+                ("lost", self.instances.lost),
+                ("cancelled", self.instances.cancelled),
+            ],
+        );
+
+        push_gauge(
+            &mut output,
+            "vessel_cluster_instance_restart_count",
+            "Aggregate restart count across VESSEL instances.",
+            self.instances.restart_count,
+        );
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_cpu_millis",
+            "VESSEL cluster CPU capacity in millicores.",
+            &[
+                ("capacity", self.resources.capacity_cpu_millis),
+                ("allocated", self.resources.allocated_cpu_millis),
+                ("available", self.resources.available_cpu_millis),
+            ],
+        );
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_memory_bytes",
+            "VESSEL cluster memory capacity in bytes.",
+            &[
+                ("capacity", self.resources.capacity_memory_bytes),
+                ("allocated", self.resources.allocated_memory_bytes),
+                ("available", self.resources.available_memory_bytes),
+            ],
+        );
+
+        push_gauge_family(
+            &mut output,
+            "vessel_cluster_instance_slots",
+            "VESSEL cluster instance scheduling slots.",
+            &[
+                ("capacity", self.resources.max_instances),
+                ("allocated", self.resources.allocated_instances),
+                ("available", self.resources.available_instances),
+            ],
+        );
+
+        output
+    }
+
     pub fn collect<'a>(
         nodes: impl IntoIterator<Item = &'a Node>,
         deployments: impl IntoIterator<Item = &'a Deployment>,
@@ -116,6 +231,44 @@ impl ClusterMetrics {
         }
 
         metrics
+    }
+}
+
+fn push_gauge(output: &mut String, name: &str, help: &str, value: u64) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" gauge\n");
+
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value.to_string());
+    output.push('\n');
+}
+
+fn push_gauge_family(output: &mut String, name: &str, help: &str, values: &[(&str, u64)]) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" gauge\n");
+
+    for (state, value) in values {
+        output.push_str(name);
+        output.push_str("{state=\"");
+        output.push_str(state);
+        output.push_str("\"} ");
+        output.push_str(&value.to_string());
+        output.push('\n');
     }
 }
 
@@ -322,6 +475,55 @@ mod tests {
     #[test]
     fn default_log_filter_is_valid() {
         assert!(EnvFilter::try_new(DEFAULT_LOG_FILTER).is_ok());
+    }
+
+    #[test]
+    fn prometheus_text_has_stable_metric_families() {
+        let metrics = ClusterMetrics {
+            nodes: NodeMetrics {
+                total: 2,
+                ready: 1,
+                unreachable: 1,
+                ..NodeMetrics::default()
+            },
+            deployments: DeploymentMetrics {
+                total: 1,
+                healthy: 1,
+                desired_replicas: 3,
+                autoscaling_enabled: 1,
+                ..DeploymentMetrics::default()
+            },
+            instances: InstanceMetrics {
+                total: 3,
+                active: 2,
+                running: 2,
+                failed: 1,
+                restart_count: 4,
+                ..InstanceMetrics::default()
+            },
+            resources: ResourceMetrics {
+                capacity_cpu_millis: 4_000,
+                allocated_cpu_millis: 1_000,
+                available_cpu_millis: 3_000,
+                capacity_memory_bytes: 8_000,
+                allocated_memory_bytes: 2_000,
+                available_memory_bytes: 6_000,
+                max_instances: 8,
+                allocated_instances: 3,
+                available_instances: 5,
+            },
+        };
+
+        let text = metrics.encode_prometheus();
+
+        assert!(text.contains("vessel_cluster_node_count{state=\"ready\"} 1\n"));
+        assert!(text.contains("vessel_cluster_deployment_desired_replicas 3\n"));
+        assert!(text.contains("vessel_cluster_instance_count{state=\"running\"} 2\n"));
+        assert!(text.contains("vessel_cluster_cpu_millis{state=\"available\"} 3000\n"));
+        assert!(text.contains("vessel_cluster_memory_bytes{state=\"capacity\"} 8000\n"));
+        assert!(text.contains("vessel_cluster_instance_slots{state=\"allocated\"} 3\n"));
+
+        assert!(text.ends_with('\n'));
     }
 
     #[test]

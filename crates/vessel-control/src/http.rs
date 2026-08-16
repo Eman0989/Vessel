@@ -6,7 +6,8 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ use vessel_core::{
     ExecutionResult, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
     WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
-use vessel_telemetry::ClusterMetrics;
+use vessel_telemetry::{ClusterMetrics, PROMETHEUS_CONTENT_TYPE};
 
 use crate::{ControlError, ControlState};
 
@@ -144,6 +145,7 @@ pub fn shared_router_with_network_config(
 
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(prometheus_metrics))
         .route("/v1/metrics", get(cluster_metrics))
         .route("/v1/cluster/register", post(register_worker))
         .route("/v1/cluster/heartbeat", post(record_heartbeat))
@@ -272,6 +274,19 @@ async fn record_heartbeat(
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn prometheus_metrics(State(state): State<SharedState>) -> Result<Response, ApiError> {
+    let metrics = {
+        let state = lock_state(&state)?;
+        state.metrics()
+    };
+
+    Ok((
+        [(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+        metrics.encode_prometheus(),
+    )
+        .into_response())
 }
 
 async fn cluster_metrics(

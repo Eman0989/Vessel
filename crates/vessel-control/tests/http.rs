@@ -3092,3 +3092,40 @@ async fn metrics_endpoint_exposes_cluster_snapshot() {
     assert_eq!(json["resources"]["allocated_instances"], 1);
     assert_eq!(json["resources"]["available_instances"], 7);
 }
+
+#[tokio::test]
+async fn prometheus_metrics_endpoint_exposes_scrape_format() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-prometheus")).unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8",
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("vessel_cluster_node_count{state=\"all\"} 1\n"));
+    assert!(text.contains("vessel_cluster_node_count{state=\"ready\"} 1\n"));
+    assert!(text.contains("# TYPE vessel_cluster_cpu_millis gauge\n"));
+    assert!(text.ends_with('\n'));
+}
