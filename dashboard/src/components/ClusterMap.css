@@ -526,3 +526,285 @@
     grid-column: auto;
   }
 }
+
+/* ---------------------------------------------------------
+   Failure transition
+   --------------------------------------------------------- */
+
+.failure-event {
+  position: absolute;
+  right: 12px;
+  top: 39px;
+  z-index: 8;
+  display: flex;
+  max-width: 270px;
+  align-items: center;
+  gap: 11px;
+  overflow: hidden;
+  border: 1px solid rgba(190, 80, 65, 0.52);
+  border-radius: 8px;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(59, 25, 21, 0.97),
+      rgba(18, 13, 12, 0.98)
+    );
+  padding: 10px 12px;
+  box-shadow:
+    0 12px 35px rgba(0, 0, 0, 0.36),
+    0 0 28px rgba(214, 92, 72, 0.08);
+  animation:
+    failure-event-enter 260ms ease-out both,
+    failure-event-glow 1.2s ease-in-out 2;
+}
+
+.failure-event::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: #c75f50;
+  content: '';
+  transform-origin: left;
+  animation:
+    failure-event-timeout
+    4.2s
+    linear
+    forwards;
+}
+
+.failure-event > div:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.failure-event__eyebrow {
+  color: #be675a;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.failure-event strong {
+  overflow: hidden;
+  color: #e3b3ab;
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-event small {
+  color: #805f59;
+  font-size: 7px;
+}
+
+.failure-event__signal {
+  position: relative;
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+}
+
+.failure-event__signal > span {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(223, 106, 89, 0.5);
+  border-radius: 50%;
+  animation: failure-signal-ring 1.35s ease-out infinite;
+}
+
+.failure-event__signal > span:nth-child(2) {
+  animation-delay: 450ms;
+}
+
+.failure-event__signal i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #e17667;
+  box-shadow: 0 0 12px rgba(225, 118, 103, 0.7);
+}
+
+.cluster-map__edge--failure-active {
+  stroke: #d56c5d;
+  stroke-width: 0.8;
+  stroke-dasharray: 3 1;
+  animation: failure-edge-flow 550ms linear infinite;
+}
+
+.cluster-map__hub--failure .cluster-map__hub-ring {
+  border-color: rgba(217, 98, 82, 0.4);
+  box-shadow:
+    0 0 0 15px rgba(187, 76, 61, 0.055),
+    0 0 0 31px rgba(187, 76, 61, 0.025),
+    0 0 70px rgba(218, 94, 78, 0.16);
+  animation: failure-hub-pulse 780ms ease-in-out 3;
+}
+
+.cluster-node--failure-active {
+  z-index: 6;
+  border-color: #bd5d50;
+  animation: failure-node-shock 700ms ease-out both;
+  box-shadow:
+    0 12px 38px rgba(0, 0, 0, 0.36),
+    0 0 0 1px rgba(214, 96, 80, 0.2),
+    0 0 32px rgba(214, 96, 80, 0.18);
+}
+
+.cluster-node--failure-active::before,
+.cluster-node--failure-active::after {
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  border: 1px solid rgba(216, 101, 85, 0.45);
+  border-radius: inherit;
+  content: '';
+  animation: failure-node-ring 1.15s ease-out 2;
+}
+
+.cluster-node--failure-active::after {
+  animation-delay: 300ms;
+}
+
+@keyframes failure-event-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-7px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes failure-event-glow {
+  0%,
+  100% {
+    border-color: rgba(190, 80, 65, 0.45);
+  }
+
+  50% {
+    border-color: rgba(227, 111, 94, 0.78);
+  }
+}
+
+@keyframes failure-event-timeout {
+  from {
+    transform: scaleX(1);
+  }
+
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes failure-signal-ring {
+  from {
+    opacity: 0.8;
+    transform: translate(-50%, -50%) scale(0.6);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(2.6);
+  }
+}
+
+@keyframes failure-edge-flow {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+@keyframes failure-hub-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  45% {
+    transform: scale(1.06);
+  }
+}
+
+@keyframes failure-node-shock {
+  0% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  24% {
+    transform: translate(-50%, -50%) scale(1.045);
+  }
+
+  48% {
+    transform: translate(-50%, -50%) scale(0.985);
+  }
+
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes failure-node-ring {
+  from {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+
+@media (max-width: 620px) {
+  .failure-event {
+    left: 10px;
+    right: 10px;
+    top: 47px;
+    max-width: none;
+  }
+
+  .cluster-node--failure-active {
+    animation: failure-node-shock-mobile 700ms ease-out both;
+  }
+
+  @keyframes failure-node-shock-mobile {
+    0% {
+      transform: scale(1);
+    }
+
+    30% {
+      transform: scale(1.015);
+    }
+
+    100% {
+      transform: scale(1);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .failure-event,
+  .failure-event::after,
+  .failure-event__signal > span,
+  .cluster-map__edge--failure-active,
+  .cluster-map__hub--failure .cluster-map__hub-ring,
+  .cluster-node--failure-active,
+  .cluster-node--failure-active::before,
+  .cluster-node--failure-active::after {
+    animation: none;
+  }
+}

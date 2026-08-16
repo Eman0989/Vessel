@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import './ClusterMap.css'
 
@@ -19,7 +19,15 @@ interface NodePosition {
   y: number
 }
 
+interface FailureEvent {
+  eventId: string
+  nodeId: string
+  nodeName: string
+  lostInstances: number
+}
+
 const MAX_VISIBLE_NODES = 8
+const FAILURE_EVENT_DURATION_MS = 4_200
 
 const ACTIVE_INSTANCE_STATUSES = new Set<InstanceStatus>([
   'pending',
@@ -95,6 +103,13 @@ export function ClusterMap({
 }: ClusterMapProps) {
   const [selectedNodeId, setSelectedNodeId] =
     useState<string | null>(null)
+  const [failureEvent, setFailureEvent] =
+    useState<FailureEvent | null>(null)
+
+  const previousNodeStatuses =
+    useRef<Map<string, NodeStatus> | null>(null)
+  const previousInstanceStatuses =
+    useRef<Map<string, InstanceStatus> | null>(null)
 
   const visibleNodes = nodes.slice(0, MAX_VISIBLE_NODES)
   const hiddenNodeCount = Math.max(
@@ -116,6 +131,67 @@ export function ClusterMap({
     }
   }
 
+  useEffect(() => {
+    const currentNodeStatuses = new Map(
+      nodes.map((node) => [node.id, node.status]),
+    )
+
+    const currentInstanceStatuses = new Map(
+      instances.map((instance) => [
+        instance.id,
+        instance.status,
+      ]),
+    )
+
+    const previousNodes = previousNodeStatuses.current
+    const previousInstances = previousInstanceStatuses.current
+
+    if (previousNodes) {
+      const newlyUnreachable = nodes.find((node) => {
+        const previousStatus = previousNodes.get(node.id)
+
+        return (
+          node.status === 'unreachable' &&
+          previousStatus !== undefined &&
+          previousStatus !== 'unreachable'
+        )
+      })
+
+      if (newlyUnreachable) {
+        const newlyLostInstances = instances.filter(
+          (instance) =>
+            instance.node_id === newlyUnreachable.id &&
+            instance.status === 'lost' &&
+            previousInstances?.get(instance.id) !== 'lost',
+        ).length
+
+        setFailureEvent({
+          eventId: `${newlyUnreachable.id}:${Date.now()}`,
+          nodeId: newlyUnreachable.id,
+          nodeName: newlyUnreachable.name,
+          lostInstances: newlyLostInstances,
+        })
+      }
+    }
+
+    previousNodeStatuses.current = currentNodeStatuses
+    previousInstanceStatuses.current = currentInstanceStatuses
+  }, [nodes, instances])
+
+  useEffect(() => {
+    if (!failureEvent) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      setFailureEvent(null)
+    }, FAILURE_EVENT_DURATION_MS)
+
+    return () => {
+      window.clearTimeout(timeout)
+    }
+  }, [failureEvent])
+
   const selectedNode =
     visibleNodes.find((node) => node.id === selectedNodeId) ?? null
 
@@ -127,6 +203,39 @@ export function ClusterMap({
     <div className="cluster-topology">
       <div className="cluster-map">
         <div className="cluster-map__grid" aria-hidden="true" />
+
+        {failureEvent && (
+          <div
+            className="failure-event"
+            role="status"
+            aria-live="polite"
+            key={failureEvent.eventId}
+          >
+            <div className="failure-event__signal">
+              <span />
+              <span />
+              <i />
+            </div>
+
+            <div>
+              <span className="failure-event__eyebrow">
+                Failure detected
+              </span>
+
+              <strong>
+                {failureEvent.nodeName} became unreachable
+              </strong>
+
+              <small>
+                {failureEvent.lostInstances > 0
+                  ? `${failureEvent.lostInstances} instance${
+                      failureEvent.lostInstances === 1 ? '' : 's'
+                    } newly marked lost`
+                  : 'No newly lost instances in this snapshot'}
+              </small>
+            </div>
+          </div>
+        )}
 
         <div className="cluster-map__legend" aria-label="Node status legend">
           {(
@@ -167,14 +276,22 @@ export function ClusterMap({
                   y1="50"
                   x2={position.x}
                   y2={position.y}
-                  className={`cluster-map__edge cluster-map__edge--${node.status}`}
+                  className={`cluster-map__edge cluster-map__edge--${node.status} ${
+                    failureEvent?.nodeId === node.id
+                      ? 'cluster-map__edge--failure-active'
+                      : ''
+                  }`}
                 />
               )
             })}
           </svg>
         )}
 
-        <div className="cluster-map__hub">
+        <div
+          className={`cluster-map__hub ${
+            failureEvent ? 'cluster-map__hub--failure' : ''
+          }`}
+        >
           <span
             className="cluster-map__hub-ring"
             aria-hidden="true"
@@ -202,6 +319,10 @@ export function ClusterMap({
               type="button"
               className={`cluster-node cluster-node--${node.status} ${
                 selected ? 'cluster-node--selected' : ''
+              } ${
+                failureEvent?.nodeId === node.id
+                  ? 'cluster-node--failure-active'
+                  : ''
               }`}
               key={node.id}
               style={{
