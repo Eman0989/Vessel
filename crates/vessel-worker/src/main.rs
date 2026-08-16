@@ -1,6 +1,8 @@
 use std::{env, error::Error, sync::Arc, time::Duration};
 
 use tokio::{net::TcpListener, time::sleep};
+use tracing::{error, info, warn};
+use vessel_telemetry::init_tracing;
 use vessel_worker::{ClusterClient, WorkerConfig, WorkerService, shared_router};
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -12,6 +14,8 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    init_tracing("worker")?;
+
     let node_id = env::var("VESSEL_NODE_ID").unwrap_or_else(|_| "worker-local".to_string());
 
     let address = env::var("VESSEL_WORKER_ADDR").unwrap_or_else(|_| "127.0.0.1:7001".to_string());
@@ -49,20 +53,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = TcpListener::bind(&address).await?;
 
-    println!(
-        "VESSEL worker {} listening on {}",
-        worker.node_id()?,
-        listener.local_addr()?,
+    let worker_node_id = worker.node_id()?;
+    let local_addr = listener.local_addr()?;
+
+    info!(
+        node_id = %worker_node_id,
+        address = %local_addr,
+        "worker listening"
     );
 
-    println!(
-        "VESSEL cluster networking connect_timeout={}ms request_timeout={}ms",
-        cluster_connect_timeout_ms, cluster_request_timeout_ms,
+    info!(
+        cluster_connect_timeout_ms,
+        cluster_request_timeout_ms, "cluster networking configured"
     );
 
-    println!(
-        "VESSEL registry networking connect_timeout={}ms request_timeout={}ms",
-        registry_connect_timeout_ms, registry_request_timeout_ms,
+    info!(
+        registry_connect_timeout_ms,
+        registry_request_timeout_ms, "registry networking configured"
     );
 
     let cluster_worker = Arc::clone(&worker);
@@ -79,30 +86,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Ok(()) => {
                             registered = true;
 
-                            println!("VESSEL worker registered with control plane");
+                            info!(
+                                node_id = %worker_node_id,
+                                "worker registered with control plane"
+                            );
                         }
 
                         Err(error) => {
-                            eprintln!("VESSEL worker registration failed: {error}");
+                            warn!(
+                                node_id = %worker_node_id,
+                                error = %error,
+                                "worker registration failed"
+                            );
                         }
                     },
 
                     Err(error) => {
-                        eprintln!("VESSEL worker registration snapshot failed: {error}");
+                        error!(
+                            node_id = %worker_node_id,
+                            error = %error,
+                            "worker registration snapshot failed"
+                        );
                     }
                 }
             } else {
                 match cluster_worker.heartbeat() {
                     Ok(heartbeat) => {
                         if let Err(error) = client.heartbeat(&heartbeat).await {
-                            eprintln!("VESSEL worker heartbeat failed: {error}");
+                            warn!(
+                                node_id = %worker_node_id,
+                                error = %error,
+                                "worker heartbeat failed"
+                            );
 
                             registered = false;
                         }
                     }
 
                     Err(error) => {
-                        eprintln!("VESSEL worker heartbeat snapshot failed: {error}");
+                        error!(
+                            node_id = %worker_node_id,
+                            error = %error,
+                            "worker heartbeat snapshot failed"
+                        );
                     }
                 }
             }

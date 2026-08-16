@@ -2838,7 +2838,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tower",
+ "tracing",
  "vessel-core",
+ "vessel-telemetry",
 ]
 
 [[package]]
@@ -2884,8 +2886,10 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tower",
+ "tracing",
  "vessel-core",
  "vessel-runtime",
+ "vessel-telemetry",
 ]
 
 [[package]]
