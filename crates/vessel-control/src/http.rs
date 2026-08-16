@@ -10,6 +10,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tower_http::{
+    LatencyUnit,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 use vessel_core::{
     AutoscalingDecision, AutoscalingPolicy, Deployment, DeploymentId, ExecutionRequest,
     ExecutionResult, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
@@ -176,6 +181,15 @@ pub fn shared_router_with_network_config(
         .route("/v1/instances/{id}/invoke", post(invoke_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
         .layer(Extension(gateway))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Micros),
+                ),
+        )
         .with_state(state)
 }
 
