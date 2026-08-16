@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { fetchClusterMetrics } from './api/control'
+import {
+  fetchClusterMetrics,
+  fetchInstances,
+  fetchNodes,
+} from './api/control'
 import './App.css'
+import { ClusterMap } from './components/ClusterMap'
 import { MetricCard } from './components/MetricCard'
+import type {
+  ClusterInstance,
+  ClusterNode,
+} from './types/cluster'
 import type { ClusterMetrics } from './types/metrics'
 
 const REFRESH_INTERVAL_MS = 5_000
@@ -33,6 +42,8 @@ function memoryLabel(bytes: number): string {
 
 function App() {
   const [metrics, setMetrics] = useState<ClusterMetrics | null>(null)
+  const [clusterNodes, setClusterNodes] = useState<ClusterNode[]>([])
+  const [clusterInstances, setClusterInstances] = useState<ClusterInstance[]>([])
   const [error, setError] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -41,9 +52,16 @@ function App() {
     setIsRefreshing(true)
 
     try {
-      const snapshot = await fetchClusterMetrics(signal)
+      const [snapshot, nodesSnapshot, instancesSnapshot] =
+        await Promise.all([
+          fetchClusterMetrics(signal),
+          fetchNodes(signal),
+          fetchInstances(signal),
+        ])
 
       setMetrics(snapshot)
+      setClusterNodes(nodesSnapshot)
+      setClusterInstances(instancesSnapshot)
       setError(null)
       setLastUpdated(new Date())
     } catch (caught) {
@@ -269,19 +287,15 @@ function App() {
                 <h3>Cluster map</h3>
               </div>
 
-              <span className="panel__badge">Step 24</span>
+              <span className="panel__badge">
+                {clusterNodes.length} nodes
+              </span>
             </div>
 
-            <div className="foundation-placeholder">
-              <div className="foundation-placeholder__core">
-                <span>VESSEL</span>
-              </div>
-
-              <p>
-                Node topology visualization will render here in the next
-                milestone.
-              </p>
-            </div>
+            <ClusterMap
+              nodes={clusterNodes}
+              instances={clusterInstances}
+            />
           </article>
 
           <article className="panel" id="telemetry">

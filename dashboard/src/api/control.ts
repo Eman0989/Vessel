@@ -1,3 +1,4 @@
+import type { ClusterInstance, ClusterNode } from '../types/cluster'
 import type { ClusterMetrics } from '../types/metrics'
 
 const CONTROL_API_BASE =
@@ -38,4 +39,16 @@ export function fetchClusterMetrics(
   signal?: AbortSignal,
 ): Promise<ClusterMetrics> {
   return requestJson<ClusterMetrics>('/v1/metrics', signal)
+}
+
+export function fetchNodes(
+  signal?: AbortSignal,
+): Promise<ClusterNode[]> {
+  return requestJson<ClusterNode[]>('/v1/nodes', signal)
+}
+
+export function fetchInstances(
+  signal?: AbortSignal,
+): Promise<ClusterInstance[]> {
+  return requestJson<ClusterInstance[]>('/v1/instances', signal)
 }
