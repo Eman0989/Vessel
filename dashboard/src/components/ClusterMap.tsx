@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import './ClusterMap.css'
 
 import type {
@@ -53,25 +55,52 @@ function statusLabel(status: NodeStatus): string {
   }
 }
 
-function allocationPercent(node: ClusterNode): number {
-  if (node.capacity.max_instances === 0) {
+function percentage(allocated: number, capacity: number): number {
+  if (capacity === 0) {
     return 0
   }
 
   return Math.min(
     100,
-    Math.round(
-      (node.allocated_instances / node.capacity.max_instances) * 100,
-    ),
+    Math.round((allocated / capacity) * 100),
   )
+}
+
+function allocationPercent(node: ClusterNode): number {
+  return percentage(
+    node.allocated_instances,
+    node.capacity.max_instances,
+  )
+}
+
+function memoryLabel(bytes: number): string {
+  if (bytes === 0) {
+    return '0 B'
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const exponent = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  )
+
+  const value = bytes / 1024 ** exponent
+
+  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`
 }
 
 export function ClusterMap({
   nodes,
   instances,
 }: ClusterMapProps) {
+  const [selectedNodeId, setSelectedNodeId] =
+    useState<string | null>(null)
+
   const visibleNodes = nodes.slice(0, MAX_VISIBLE_NODES)
-  const hiddenNodeCount = Math.max(0, nodes.length - visibleNodes.length)
+  const hiddenNodeCount = Math.max(
+    0,
+    nodes.length - visibleNodes.length,
+  )
 
   const activeInstancesByNode = new Map<string, number>()
 
@@ -87,102 +116,233 @@ export function ClusterMap({
     }
   }
 
+  const selectedNode =
+    visibleNodes.find((node) => node.id === selectedNodeId) ?? null
+
+  const selectedActiveInstances = selectedNode
+    ? activeInstancesByNode.get(selectedNode.id) ?? 0
+    : 0
+
   return (
-    <div className="cluster-map">
-      <div className="cluster-map__grid" aria-hidden="true" />
+    <div className="cluster-topology">
+      <div className="cluster-map">
+        <div className="cluster-map__grid" aria-hidden="true" />
 
-      {visibleNodes.length > 0 && (
-        <svg
-          className="cluster-map__edges"
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          {visibleNodes.map((node, index) => {
-            const position = nodePosition(index, visibleNodes.length)
-
-            return (
-              <line
-                key={node.id}
-                x1="50"
-                y1="50"
-                x2={position.x}
-                y2={position.y}
-                className={`cluster-map__edge cluster-map__edge--${node.status}`}
+        <div className="cluster-map__legend" aria-label="Node status legend">
+          {(
+            [
+              'ready',
+              'joining',
+              'draining',
+              'unreachable',
+            ] as NodeStatus[]
+          ).map((status) => (
+            <span key={status}>
+              <i
+                className={`cluster-map__legend-dot cluster-map__legend-dot--${status}`}
+                aria-hidden="true"
               />
-            )
-          })}
-        </svg>
-      )}
-
-      <div className="cluster-map__hub">
-        <span className="cluster-map__hub-ring" aria-hidden="true" />
-
-        <div className="cluster-map__hub-core">
-          <span>VESSEL</span>
-          <strong>CONTROL</strong>
+              {statusLabel(status)}
+            </span>
+          ))}
         </div>
 
-        <span className="cluster-map__hub-caption">
-          {nodes.length} worker{nodes.length === 1 ? '' : 's'}
-        </span>
-      </div>
-
-      {visibleNodes.map((node, index) => {
-        const position = nodePosition(index, visibleNodes.length)
-        const activeInstances =
-          activeInstancesByNode.get(node.id) ?? 0
-        const allocation = allocationPercent(node)
-
-        return (
-          <article
-            className={`cluster-node cluster-node--${node.status}`}
-            key={node.id}
-            style={{
-              left: `${position.x}%`,
-              top: `${position.y}%`,
-            }}
-            title={`${node.id} · ${statusLabel(node.status)}`}
+        {visibleNodes.length > 0 && (
+          <svg
+            className="cluster-map__edges"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            aria-hidden="true"
           >
-            <div className="cluster-node__header">
-              <span className="cluster-node__status-dot" />
+            {visibleNodes.map((node, index) => {
+              const position = nodePosition(
+                index,
+                visibleNodes.length,
+              )
 
-              <strong>{node.name}</strong>
+              return (
+                <line
+                  key={node.id}
+                  x1="50"
+                  y1="50"
+                  x2={position.x}
+                  y2={position.y}
+                  className={`cluster-map__edge cluster-map__edge--${node.status}`}
+                />
+              )
+            })}
+          </svg>
+        )}
 
-              <span className="cluster-node__state">
-                {statusLabel(node.status)}
-              </span>
-            </div>
+        <div className="cluster-map__hub">
+          <span
+            className="cluster-map__hub-ring"
+            aria-hidden="true"
+          />
 
-            <div className="cluster-node__meta">
-              <span>{node.region}</span>
-              <span>{activeInstances} active</span>
-            </div>
+          <div className="cluster-map__hub-core">
+            <span>VESSEL</span>
+            <strong>CONTROL</strong>
+          </div>
 
-            <div
-              className="cluster-node__capacity"
-              aria-label={`${allocation}% instance capacity allocated`}
-            >
-              <span style={{ width: `${allocation}%` }} />
-            </div>
-          </article>
-        )
-      })}
-
-      {nodes.length === 0 && (
-        <div className="cluster-map__empty">
-          <strong>No workers registered</strong>
-          <span>
-            Nodes will appear here when they join the control plane.
+          <span className="cluster-map__hub-caption">
+            {nodes.length} worker{nodes.length === 1 ? '' : 's'}
           </span>
         </div>
-      )}
 
-      {hiddenNodeCount > 0 && (
-        <div className="cluster-map__overflow">
-          +{hiddenNodeCount} additional node
-          {hiddenNodeCount === 1 ? '' : 's'}
-        </div>
+        {visibleNodes.map((node, index) => {
+          const position = nodePosition(index, visibleNodes.length)
+          const activeInstances =
+            activeInstancesByNode.get(node.id) ?? 0
+          const allocation = allocationPercent(node)
+          const selected = selectedNodeId === node.id
+
+          return (
+            <button
+              type="button"
+              className={`cluster-node cluster-node--${node.status} ${
+                selected ? 'cluster-node--selected' : ''
+              }`}
+              key={node.id}
+              style={{
+                left: `${position.x}%`,
+                top: `${position.y}%`,
+              }}
+              aria-pressed={selected}
+              aria-label={`${node.name}, ${statusLabel(node.status)}, ${activeInstances} active instances`}
+              onClick={() =>
+                setSelectedNodeId((current) =>
+                  current === node.id ? null : node.id,
+                )
+              }
+            >
+              <div className="cluster-node__header">
+                <span
+                  className="cluster-node__status-dot"
+                  aria-hidden="true"
+                />
+
+                <strong>{node.name}</strong>
+
+                <span className="cluster-node__state">
+                  {statusLabel(node.status)}
+                </span>
+              </div>
+
+              <div className="cluster-node__meta">
+                <span>{node.region}</span>
+                <span>{activeInstances} active</span>
+              </div>
+
+              <div
+                className="cluster-node__capacity"
+                aria-label={`${allocation}% instance capacity allocated`}
+              >
+                <span style={{ width: `${allocation}%` }} />
+              </div>
+            </button>
+          )
+        })}
+
+        {nodes.length === 0 && (
+          <div className="cluster-map__empty">
+            <strong>No workers registered</strong>
+            <span>
+              Nodes will appear here when they join the control plane.
+            </span>
+          </div>
+        )}
+
+        {hiddenNodeCount > 0 && (
+          <div className="cluster-map__overflow">
+            +{hiddenNodeCount} additional node
+            {hiddenNodeCount === 1 ? '' : 's'}
+          </div>
+        )}
+      </div>
+
+      {selectedNode && (
+        <section
+          className={`node-inspector node-inspector--${selectedNode.status}`}
+          aria-label={`Worker details for ${selectedNode.name}`}
+        >
+          <div className="node-inspector__identity">
+            <div className="node-inspector__title">
+              <span className="node-inspector__status-dot" />
+
+              <div>
+                <strong>{selectedNode.name}</strong>
+                <span>{selectedNode.id}</span>
+              </div>
+            </div>
+
+            <div className="node-inspector__tags">
+              <span>{statusLabel(selectedNode.status)}</span>
+              <span>{selectedNode.region}</span>
+              <span>{selectedActiveInstances} active</span>
+            </div>
+          </div>
+
+          <div className="node-inspector__metric">
+            <div>
+              <span>CPU</span>
+              <strong>
+                {selectedNode.allocated.cpu_millis} /{' '}
+                {selectedNode.capacity.cpu_millis} m
+              </strong>
+            </div>
+
+            <div className="node-inspector__track">
+              <span
+                style={{
+                  width: `${percentage(
+                    selectedNode.allocated.cpu_millis,
+                    selectedNode.capacity.cpu_millis,
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="node-inspector__metric">
+            <div>
+              <span>Memory</span>
+              <strong>
+                {memoryLabel(selectedNode.allocated.memory_bytes)} /{' '}
+                {memoryLabel(selectedNode.capacity.memory_bytes)}
+              </strong>
+            </div>
+
+            <div className="node-inspector__track">
+              <span
+                style={{
+                  width: `${percentage(
+                    selectedNode.allocated.memory_bytes,
+                    selectedNode.capacity.memory_bytes,
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="node-inspector__metric">
+            <div>
+              <span>Instance slots</span>
+              <strong>
+                {selectedNode.allocated_instances} /{' '}
+                {selectedNode.capacity.max_instances}
+              </strong>
+            </div>
+
+            <div className="node-inspector__track">
+              <span
+                style={{
+                  width: `${allocationPercent(selectedNode)}%`,
+                }}
+              />
+            </div>
+          </div>
+        </section>
       )}
     </div>
   )
