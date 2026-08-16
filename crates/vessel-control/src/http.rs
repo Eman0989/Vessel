@@ -15,6 +15,7 @@ use vessel_core::{
     ExecutionResult, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
     WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
+use vessel_telemetry::ClusterMetrics;
 
 use crate::{ControlError, ControlState};
 
@@ -138,6 +139,7 @@ pub fn shared_router_with_network_config(
 
     Router::new()
         .route("/health", get(health))
+        .route("/v1/metrics", get(cluster_metrics))
         .route("/v1/cluster/register", post(register_worker))
         .route("/v1/cluster/heartbeat", post(record_heartbeat))
         .route("/v1/nodes", get(list_nodes).post(register_node))
@@ -256,6 +258,14 @@ async fn record_heartbeat(
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn cluster_metrics(
+    State(state): State<SharedState>,
+) -> Result<Json<ClusterMetrics>, ApiError> {
+    let state = lock_state(&state)?;
+
+    Ok(Json(state.metrics()))
 }
 
 async fn list_nodes(State(state): State<SharedState>) -> Result<Json<Vec<Node>>, ApiError> {

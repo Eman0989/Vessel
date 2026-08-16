@@ -69,7 +69,11 @@ pub struct ResourceMetrics {
 }
 
 impl ClusterMetrics {
-    pub fn collect(nodes: &[Node], deployments: &[Deployment], instances: &[Instance]) -> Self {
+    pub fn collect<'a>(
+        nodes: impl IntoIterator<Item = &'a Node>,
+        deployments: impl IntoIterator<Item = &'a Deployment>,
+        instances: impl IntoIterator<Item = &'a Instance>,
+    ) -> Self {
         let mut metrics = Self::default();
 
         for node in nodes {

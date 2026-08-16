@@ -3372,3 +3372,54 @@ fn scale_down_during_rollout_prefers_previous_revision() {
     assert_eq!(deployment.generation, 3);
     assert_eq!(deployment.status, DeploymentStatus::Healthy,);
 }
+
+#[test]
+fn control_state_metrics_reflect_authoritative_state() {
+    let mut state = ControlState::new();
+
+    let mut worker = node("node-metrics");
+    worker.allocated = ResourceRequest::new(500, 67_108_864);
+    worker.allocated_instances = 1;
+
+    state.register_node(worker).unwrap();
+    state
+        .register_workload(workload("workload-metrics"))
+        .unwrap();
+
+    state
+        .create_deployment(deployment("deployment-metrics", "workload-metrics"))
+        .unwrap();
+
+    state
+        .create_instance(instance(
+            "instance-metrics",
+            "deployment-metrics",
+            "workload-metrics",
+        ))
+        .unwrap();
+
+    let metrics = state.metrics();
+
+    assert_eq!(metrics.nodes.total, 1);
+    assert_eq!(metrics.nodes.ready, 1);
+
+    assert_eq!(metrics.deployments.total, 1);
+    assert_eq!(metrics.deployments.pending, 1);
+    assert_eq!(metrics.deployments.desired_replicas, 2);
+
+    assert_eq!(metrics.instances.total, 1);
+    assert_eq!(metrics.instances.active, 1);
+    assert_eq!(metrics.instances.pending, 1);
+
+    assert_eq!(metrics.resources.capacity_cpu_millis, 4_000);
+    assert_eq!(metrics.resources.allocated_cpu_millis, 500);
+    assert_eq!(metrics.resources.available_cpu_millis, 3_500);
+
+    assert_eq!(metrics.resources.capacity_memory_bytes, 536_870_912,);
+    assert_eq!(metrics.resources.allocated_memory_bytes, 67_108_864,);
+    assert_eq!(metrics.resources.available_memory_bytes, 469_762_048,);
+
+    assert_eq!(metrics.resources.max_instances, 8);
+    assert_eq!(metrics.resources.allocated_instances, 1);
+    assert_eq!(metrics.resources.available_instances, 7);
+}
