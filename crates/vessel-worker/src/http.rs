@@ -7,6 +7,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
+use tower_http::{
+    LatencyUnit,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 use vessel_core::{NodeStatus, ResourceCapacity, ResourceRequest};
 
 use crate::{ExecutionRequest, ExecutionResult, WorkerError, WorkerService};
@@ -44,6 +49,15 @@ pub fn shared_router(worker: Arc<WorkerService>) -> Router {
         .route("/v1/execute", post(execute))
         .route("/v1/drain", post(drain))
         .route("/v1/resume", post(resume))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Micros),
+                ),
+        )
         .with_state(worker)
 }
 

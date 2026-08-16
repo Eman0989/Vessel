@@ -7,6 +7,7 @@ use vessel_core::{
 };
 
 use vessel_scheduler::{Scheduler, SchedulerError};
+use vessel_telemetry::ClusterMetrics;
 
 use crate::ControlError;
 
@@ -269,6 +270,14 @@ impl ControlState {
 
     pub fn list_instances(&self) -> Vec<Instance> {
         self.instances.values().cloned().collect()
+    }
+
+    pub fn metrics(&self) -> ClusterMetrics {
+        ClusterMetrics::collect(
+            self.nodes.values(),
+            self.deployments.values(),
+            self.instances.values(),
+        )
     }
 
     pub fn update_node_status(

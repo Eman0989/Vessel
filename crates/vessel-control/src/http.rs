@@ -6,15 +6,22 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use tower_http::{
+    LatencyUnit,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 use vessel_core::{
     AutoscalingDecision, AutoscalingPolicy, Deployment, DeploymentId, ExecutionRequest,
     ExecutionResult, Instance, InstanceId, InstanceStatus, Node, NodeId, NodeStatus,
     WorkerHeartbeat, WorkerRegistration, Workload, WorkloadId,
 };
+use vessel_telemetry::{ClusterMetrics, PROMETHEUS_CONTENT_TYPE};
 
 use crate::{ControlError, ControlState};
 
@@ -138,6 +145,8 @@ pub fn shared_router_with_network_config(
 
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(prometheus_metrics))
+        .route("/v1/metrics", get(cluster_metrics))
         .route("/v1/cluster/register", post(register_worker))
         .route("/v1/cluster/heartbeat", post(record_heartbeat))
         .route("/v1/nodes", get(list_nodes).post(register_node))
@@ -174,6 +183,15 @@ pub fn shared_router_with_network_config(
         .route("/v1/instances/{id}/invoke", post(invoke_instance))
         .route("/v1/instances/{id}/transition", post(transition_instance))
         .layer(Extension(gateway))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Micros),
+                ),
+        )
         .with_state(state)
 }
 
@@ -256,6 +274,27 @@ async fn record_heartbeat(
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn prometheus_metrics(State(state): State<SharedState>) -> Result<Response, ApiError> {
+    let metrics = {
+        let state = lock_state(&state)?;
+        state.metrics()
+    };
+
+    Ok((
+        [(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+        metrics.encode_prometheus(),
+    )
+        .into_response())
+}
+
+async fn cluster_metrics(
+    State(state): State<SharedState>,
+) -> Result<Json<ClusterMetrics>, ApiError> {
+    let state = lock_state(&state)?;
+
+    Ok(Json(state.metrics()))
 }
 
 async fn list_nodes(State(state): State<SharedState>) -> Result<Json<Vec<Node>>, ApiError> {

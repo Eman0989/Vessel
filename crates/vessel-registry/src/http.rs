@@ -9,6 +9,11 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
+use tower_http::{
+    LatencyUnit,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 use vessel_core::ArtifactRef;
 
 use crate::{ArtifactStore, RegistryError, StoredArtifact};
@@ -31,6 +36,15 @@ pub fn router(store: ArtifactStore) -> Router {
         .route("/health", get(health))
         .route("/v1/artifacts", post(upload_artifact))
         .route("/v1/artifacts/{digest}", get(download_artifact))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Micros),
+                ),
+        )
         .with_state(Arc::new(Mutex::new(store)))
 }
 

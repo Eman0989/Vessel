@@ -3033,3 +3033,99 @@ async fn rolling_deployment_converges_over_http() {
 
     assert!(final_pass.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn metrics_endpoint_exposes_cluster_snapshot() {
+    let mut state = ControlState::new();
+
+    let mut worker = node("node-metrics");
+    worker.allocated = ResourceRequest::new(500, 67_108_864);
+    worker.allocated_instances = 1;
+
+    state.register_node(worker).unwrap();
+    state
+        .register_workload(workload("workload-metrics"))
+        .unwrap();
+
+    state
+        .create_deployment(deployment("deployment-metrics", "workload-metrics"))
+        .unwrap();
+
+    state
+        .create_instance(instance(
+            "instance-metrics",
+            "deployment-metrics",
+            "workload-metrics",
+        ))
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = body_json(response).await;
+
+    assert_eq!(json["nodes"]["total"], 1);
+    assert_eq!(json["nodes"]["ready"], 1);
+
+    assert_eq!(json["deployments"]["total"], 1);
+    assert_eq!(json["deployments"]["pending"], 1);
+    assert_eq!(json["deployments"]["desired_replicas"], 2);
+
+    assert_eq!(json["instances"]["total"], 1);
+    assert_eq!(json["instances"]["active"], 1);
+    assert_eq!(json["instances"]["pending"], 1);
+
+    assert_eq!(json["resources"]["capacity_cpu_millis"], 4_000);
+    assert_eq!(json["resources"]["allocated_cpu_millis"], 500);
+    assert_eq!(json["resources"]["available_cpu_millis"], 3_500);
+
+    assert_eq!(json["resources"]["max_instances"], 8);
+    assert_eq!(json["resources"]["allocated_instances"], 1);
+    assert_eq!(json["resources"]["available_instances"], 7);
+}
+
+#[tokio::test]
+async fn prometheus_metrics_endpoint_exposes_scrape_format() {
+    let mut state = ControlState::new();
+
+    state.register_node(node("node-prometheus")).unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8",
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("vessel_cluster_node_count{state=\"all\"} 1\n"));
+    assert!(text.contains("vessel_cluster_node_count{state=\"ready\"} 1\n"));
+    assert!(text.contains("# TYPE vessel_cluster_cpu_millis gauge\n"));
+    assert!(text.ends_with('\n'));
+}
