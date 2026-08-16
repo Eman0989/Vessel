@@ -2763,6 +2763,11 @@ dependencies = [
 [[package]]
 name = "vessel-telemetry"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vessel-core",
+]
 
 [[package]]
 name = "vessel-worker"
