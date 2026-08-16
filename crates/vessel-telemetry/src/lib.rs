@@ -1,5 +1,31 @@
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::{
+    EnvFilter,
+    util::{SubscriberInitExt, TryInitError},
+};
 use vessel_core::{Deployment, DeploymentStatus, Instance, InstanceStatus, Node, NodeStatus};
+
+pub const DEFAULT_LOG_FILTER: &str = "info";
+
+/// Install VESSEL's process-wide structured tracing subscriber.
+///
+/// `RUST_LOG` controls filtering when present. Invalid or missing filters
+/// fall back to the stable `info` default.
+pub fn init_tracing(service_name: &str) -> Result<(), TryInitError> {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .compact()
+        .finish()
+        .try_init()?;
+
+    tracing::info!(service = service_name, "VESSEL tracing initialized");
+
+    Ok(())
+}
 
 /// Point-in-time aggregate telemetry derived from authoritative cluster state.
 ///
@@ -291,6 +317,11 @@ mod tests {
             resources: ResourceRequest::new(100, 256),
             restart_count,
         }
+    }
+
+    #[test]
+    fn default_log_filter_is_valid() {
+        assert!(EnvFilter::try_new(DEFAULT_LOG_FILTER).is_ok());
     }
 
     #[test]

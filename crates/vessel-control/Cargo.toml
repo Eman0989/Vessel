@@ -10,6 +10,7 @@ serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 vessel-core = { path = "../vessel-core" }
 vessel-scheduler = { path = "../vessel-scheduler" }
 vessel-telemetry = { path = "../vessel-telemetry" }

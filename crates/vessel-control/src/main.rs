@@ -7,10 +7,12 @@ use std::{
 };
 
 use tokio::{net::TcpListener, time::sleep};
+use tracing::{error, info, warn};
 use vessel_control::{
     ControlNetworkConfig, ControlState, PostgresStore, SharedState,
     shared_router_with_network_config,
 };
+use vessel_telemetry::init_tracing;
 
 fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
@@ -44,9 +46,10 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
                         Ok(instances) => instances,
 
                         Err(error) => {
-                            eprintln!(
-                                "VESSEL failure detector: failed to recover instances on worker {}: {}",
-                                node.id, error,
+                            error!(
+                                node_id = %node.id,
+                                error = %error,
+                                "failure detector failed to recover instances on worker"
                             );
 
                             Vec::new()
@@ -69,9 +72,10 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
                         }
 
                         Err(error) => {
-                            eprintln!(
-                                "VESSEL recovery: failed to reconcile deployment {}: {}",
-                                deployment_id, error,
+                            error!(
+                                deployment_id = %deployment_id,
+                                error = %error,
+                                "recovery failed to reconcile deployment"
                             );
                         }
                     }
@@ -81,29 +85,31 @@ async fn run_failure_detector(state: SharedState, timeout_ms: u64, check_interva
             }
 
             Err(_) => {
-                eprintln!("VESSEL failure detector: control state lock was poisoned");
+                error!("failure detector control state lock was poisoned");
                 continue;
             }
         };
 
         for (node, lost_instances) in recoveries {
-            eprintln!(
-                "VESSEL worker {} marked unreachable after heartbeat timeout",
-                node.id,
+            warn!(
+                node_id = %node.id,
+                "worker marked unreachable after heartbeat timeout"
             );
 
             for instance in lost_instances {
-                eprintln!(
-                    "VESSEL instance {} marked lost after worker {} became unreachable",
-                    instance.id, node.id,
+                warn!(
+                    instance_id = %instance.id,
+                    node_id = %node.id,
+                    "instance marked lost after worker became unreachable"
                 );
             }
         }
 
         for instance in reconciled_instances {
-            eprintln!(
-                "VESSEL recovery reconciled instance {} with status {:?}",
-                instance.id, instance.status,
+            info!(
+                instance_id = %instance.id,
+                status = ?instance.status,
+                "recovery reconciled instance"
             );
         }
     }
@@ -119,15 +125,15 @@ async fn run_persistence_loop(state: SharedState, store: PostgresStore, interval
             Ok(state) => state.clone(),
 
             Err(_) => {
-                eprintln!("VESSEL persistence: control state lock was poisoned");
+                error!("persistence control state lock was poisoned");
                 continue;
             }
         };
 
         if let Err(error) = store.save_snapshot(&snapshot).await {
-            eprintln!(
-                "VESSEL persistence: failed to save control state: {}",
-                error,
+            error!(
+                error = %error,
+                "failed to persist control state snapshot"
             );
         }
     }
@@ -135,6 +141,8 @@ async fn run_persistence_loop(state: SharedState, store: PostgresStore, interval
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    init_tracing("control-plane")?;
+
     let address = env::var("VESSEL_CONTROL_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
 
     // Workers currently heartbeat every 5 seconds by default. Three missed
@@ -162,19 +170,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let restored = store.load_snapshot().await?;
 
-            println!(
-                "VESSEL restored persistent control state: nodes={} workloads={} deployments={} instances={}",
-                restored.node_count(),
-                restored.workload_count(),
-                restored.deployment_count(),
-                restored.instance_count(),
+            info!(
+                nodes = restored.node_count(),
+                workloads = restored.workload_count(),
+                deployments = restored.deployment_count(),
+                instances = restored.instance_count(),
+                "restored persistent control state"
             );
 
             (restored, Some(store))
         }
 
         Err(_) => {
-            println!("VESSEL persistence disabled: DATABASE_URL is not set");
+            info!("persistence disabled because DATABASE_URL is not set");
 
             (ControlState::new(), None)
         }
@@ -182,19 +190,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = TcpListener::bind(&address).await?;
 
-    println!(
-        "VESSEL control plane listening on {}",
-        listener.local_addr()?,
+    let local_addr = listener.local_addr()?;
+
+    info!(
+        address = %local_addr,
+        "control plane listening"
     );
 
-    println!(
-        "VESSEL failure detector timeout={}ms check_interval={}ms",
-        failure_timeout_ms, failure_check_interval_ms,
+    info!(
+        failure_timeout_ms,
+        failure_check_interval_ms, "failure detector configured"
     );
 
-    println!(
-        "VESSEL gateway networking connect_timeout={}ms request_timeout={}ms",
-        gateway_connect_timeout_ms, gateway_request_timeout_ms,
+    info!(
+        gateway_connect_timeout_ms,
+        gateway_request_timeout_ms, "gateway networking configured"
     );
 
     let state: SharedState = Arc::new(Mutex::new(initial_state));
@@ -208,10 +218,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ));
 
     if let Some(store) = postgres_store {
-        println!(
-            "VESSEL persistence enabled interval={}ms",
-            persistence_interval_ms,
-        );
+        info!(persistence_interval_ms, "persistence enabled");
 
         let persistence_state = Arc::clone(&state);
 
